@@ -261,6 +261,7 @@ def test_new_optional_fields_default_to_none():
         notification_text="x",
     )
     assert a.bid_project_type is None
+    assert a.bid_reference_number is None
     assert a.bid_submission_method is None
     assert a.rfi_due_date_iso is None
     assert a.pre_bid_meeting_iso is None
@@ -268,6 +269,7 @@ def test_new_optional_fields_default_to_none():
     assert a.pre_bid_meeting_mandatory is False
     assert a.pre_bid_meeting_location is None
     assert a.pre_bid_meeting_link is None
+    assert a.pre_bid_contact is None
 
 
 def test_fallback_analysis_includes_new_fields():
@@ -277,3 +279,20 @@ def test_fallback_analysis_includes_new_fields():
     assert fb.pre_bid_meeting_mandatory is False
     assert fb.rfi_due_date_iso is None
     assert fb.bid_submission_method is None
+    assert fb.bid_reference_number is None
+    assert fb.pre_bid_contact is None
+
+
+def test_bid_reference_number_round_trips():
+    a = _base_bid(bid_reference_number="405-26R0015165")
+    assert a.bid_reference_number == "405-26R0015165"
+
+
+def test_pre_bid_contact_separate_from_bid_contact():
+    a = _base_bid(
+        bid_contact="Toribio Solis (toribio.solis@dps.texas.gov)",
+        pre_bid_contact="Michael Hodge (469) 560-0959",
+    )
+    assert a.bid_contact != a.pre_bid_contact
+    assert "Hodge" in a.pre_bid_contact
+    assert "Solis" in a.bid_contact

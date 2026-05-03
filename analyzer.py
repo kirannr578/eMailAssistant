@@ -58,6 +58,7 @@ class Analysis(BaseModel):
     bid_project_name: str | None = None
     bid_project_location: str | None = None
     bid_project_type: str | None = None       # e.g. "Mechanical TI", "Ground-up multifamily"
+    bid_reference_number: str | None = None   # solicitation #, IFB #, RFP #, project #
 
     # Proposal / quote submission ("when does our bid have to be in?")
     bid_due_date_iso: str | None = None
@@ -72,9 +73,10 @@ class Analysis(BaseModel):
     pre_bid_meeting_mandatory: bool = False
     pre_bid_meeting_location: str | None = None   # physical address, if any
     pre_bid_meeting_link: str | None = None       # virtual meeting URL, if any
+    pre_bid_contact: str | None = None            # SEPARATE site-visit contact, if distinct
 
     bid_scope_summary: str | None = None
-    bid_contact: str | None = None
+    bid_contact: str | None = None                # primary bid / submission contact
 
     # ----- shared -----
     summary: str
@@ -140,8 +142,15 @@ If is_bid_request=true:
 - Extract bid_project_location (city / address / region if mentioned).
 - Extract bid_project_type (trade or scope, e.g. "Mechanical TI",
   "Ground-up multifamily", "Site demo", "Steel erection"). Null if unclear.
+- Extract bid_reference_number = the official solicitation / IFB / RFP /
+  project number used to identify this bid. Common formats:
+  "405-26R0015165", "RFP-2026-001", "Project #4287", "ITB 24-08",
+  "IFB 22A-01". Often appears in the subject, in an "Attention:" line,
+  or after "Re:". Null if no clear reference number is present.
 - Extract bid_scope_summary (one sentence: what work is being bid).
-- Extract bid_contact (name and/or email of who to submit the bid to).
+- Extract bid_contact = the PRIMARY contact for the bid itself: questions
+  about the solicitation, contract administration, where to send the bid.
+  This is usually the person who SIGNED the email. Format: "Name (email)".
 
 PROPOSAL / BID SUBMISSION DETAILS
 - bid_due_date_iso = when OUR proposal/bid/quote must be submitted (absolute
@@ -172,6 +181,11 @@ conference", "site walk", "jobwalk", "walkthrough", "site visit",
   in-person. Null if it's virtual-only.
 - pre_bid_meeting_link = URL of the virtual meeting (Teams, Zoom, Meet,
   Webex, etc.) if it's virtual or hybrid. Null if in-person-only.
+- pre_bid_contact = the contact for the SITE VISIT / pre-bid meeting
+  ONLY when it is a DIFFERENT person from bid_contact. Government IFBs
+  often list a separate person for site-visit logistics (e.g. "Site Visit
+  Point of Contact: <name> at <phone>. Contact is for Site Visit only.").
+  When the email gives only one contact, set pre_bid_contact = null.
 
 NOT bid requests: vendor sales pitches asking US to buy something, generic
 marketing, status updates on jobs already in progress, change orders on
@@ -209,6 +223,7 @@ Return STRICT JSON matching this schema. No markdown, no commentary.
   "bid_project_name":         string | null,
   "bid_project_location":     string | null,
   "bid_project_type":         string | null,
+  "bid_reference_number":     string | null,
   "bid_due_date_iso":         string | null,
   "bid_submission_method":    string | null,
   "rfi_due_date_iso":         string | null,
@@ -217,6 +232,7 @@ Return STRICT JSON matching this schema. No markdown, no commentary.
   "pre_bid_meeting_mandatory": bool,
   "pre_bid_meeting_location": string | null,
   "pre_bid_meeting_link":     string | null,
+  "pre_bid_contact":          string | null,
   "bid_scope_summary":        string | null,
   "bid_contact":              string | null,
 

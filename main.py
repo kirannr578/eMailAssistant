@@ -306,17 +306,20 @@ def _process_one(
         else:
             start, end = window
             project = analysis.bid_project_name or msg.subject
+            ref_prefix = f"[{analysis.bid_reference_number}] " if analysis.bid_reference_number else ""
             try:
                 eid = calendar.create_event(
-                    subject=f"BID DUE: {project}",
+                    subject=f"BID DUE: {ref_prefix}{project}",
                     start=start,
                     end=end,
                     body_text=(
                         f"Auto-created bid deadline reminder by Email Assistant.\n\n"
                         f"From: {msg.sender}\n"
                         f"Project: {analysis.bid_project_name or '(see email)'}\n"
+                        f"Reference #: {analysis.bid_reference_number or '(none stated)'}\n"
                         f"Location: {analysis.bid_project_location or '(see email)'}\n"
                         f"Scope: {analysis.bid_scope_summary or '(see email)'}\n"
+                        f"Submit via: {analysis.bid_submission_method or '(see email)'}\n"
                         f"Submit to: {analysis.bid_contact or '(see email)'}\n\n"
                         f"Summary: {analysis.summary}\n"
                         f"Suggested action: {analysis.suggested_action}\n\n"
@@ -344,8 +347,9 @@ def _process_one(
         else:
             pb_start, pb_end = pb_window
             project = analysis.bid_project_name or msg.subject
+            ref_prefix = f"[{analysis.bid_reference_number}] " if analysis.bid_reference_number else ""
             mandatory_tag = "MANDATORY " if analysis.pre_bid_meeting_mandatory else ""
-            pb_subject = f"PRE-BID {mandatory_tag}WALKTHROUGH: {project}".strip()
+            pb_subject = f"PRE-BID {mandatory_tag}WALKTHROUGH: {ref_prefix}{project}".strip()
             # Calendar 'location' field: prefer physical address, fall back to virtual link.
             pb_location = (
                 analysis.pre_bid_meeting_location
@@ -356,6 +360,10 @@ def _process_one(
                 f"Virtual link: {analysis.pre_bid_meeting_link}\n"
                 if analysis.pre_bid_meeting_link else ""
             )
+            site_contact_line = (
+                f"Site visit contact: {analysis.pre_bid_contact}\n"
+                if analysis.pre_bid_contact else ""
+            )
             try:
                 pb_eid = calendar.create_event(
                     subject=pb_subject,
@@ -365,9 +373,12 @@ def _process_one(
                         f"Auto-created pre-bid meeting by Email Assistant.\n\n"
                         f"From: {msg.sender}\n"
                         f"Project: {project}\n"
+                        f"Reference #: {analysis.bid_reference_number or '(none stated)'}\n"
                         f"Project location: {analysis.bid_project_location or '(see email)'}\n"
                         f"Meeting location: {analysis.pre_bid_meeting_location or '(see virtual link)'}\n"
                         f"{virtual_line}"
+                        f"{site_contact_line}"
+                        f"Bid contact: {analysis.bid_contact or '(see email)'}\n"
                         f"Mandatory: {'YES' if analysis.pre_bid_meeting_mandatory else 'no'}\n\n"
                         f"Summary: {analysis.summary}\n\n"
                         f"Original email: {msg.web_link or '(link unavailable)'}"

@@ -72,9 +72,14 @@ Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 ├── scripts/
 │   ├── setup_entra.ps1     # Auto-create Entra app via Azure CLI
 │   └── install_task.ps1    # Register / uninstall the Windows Scheduled Task
+├── tools/
+│   └── test_analyze.py     # Local LLM harness: feed a saved email, print Analysis
+├── samples/                # Example email files for the test harness
+│   └── dps_mt_pleasant_ifb.txt
 ├── tests/
 │   ├── test_analyzer.py
-│   └── test_document_downloader.py
+│   ├── test_document_downloader.py
+│   └── test_test_analyze.py
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -404,6 +409,7 @@ For every bid email, the agent's LLM pulls out:
 | **Project name** | Best-guess from subject + body. |
 | **Project location** | City, address, or region. |
 | **Project type / scope** | Trade or scope, e.g. "Mechanical TI", "Ground-up multifamily", "Site demo". |
+| **Reference number** | Solicitation #, IFB #, RFP #, project # - e.g. "405-26R0015165", "RFP-2026-001". |
 | **Bid scope summary** | One-sentence description of the work being bid. |
 | **Proposal due date** | When OUR bid must be submitted. If only a date is given, defaults to 17:00 local. |
 | **Submission method** | "email", "online portal", "in-person", "BuildingConnected", "Procore", etc. |
@@ -412,7 +418,8 @@ For every bid email, the agent's LLM pulls out:
 | **Pre-bid mandatory flag** | True only when the email explicitly says "mandatory" / "required". |
 | **Pre-bid meeting location** | Physical address for in-person walkthroughs. |
 | **Pre-bid virtual link** | Teams / Zoom / Meet / Webex URL for virtual or hybrid meetings. |
-| **Bid contact** | Who to send the bid to (name and/or email). |
+| **Pre-bid contact** | Site-visit-only contact, when the email lists a different person from the bid contact (common in government IFBs). |
+| **Bid contact** | Primary contact: questions, contract administrator, where to send the bid. |
 
 ### What gets calendared
 
@@ -420,9 +427,13 @@ Calendar events are created automatically when `bid_confidence >= AUTO_BLOCK_CON
 
 | Calendar event | When it's created |
 |---|---|
-| `BID DUE: <project>` at the due time | `AUTO_BLOCK_BID_REMINDER=1` and the proposal due date is in the future. |
-| `PRE-BID MANDATORY WALKTHROUGH: <project>` | Email mentions a pre-bid meeting AND it's flagged mandatory. Confirmed (not tentative). |
-| `PRE-BID WALKTHROUGH: <project>` | Email mentions a non-mandatory walkthrough. Tentative. |
+| `BID DUE: [<ref>] <project>` at the due time | `AUTO_BLOCK_BID_REMINDER=1` and the proposal due date is in the future. |
+| `PRE-BID MANDATORY WALKTHROUGH: [<ref>] <project>` | Email mentions a pre-bid meeting AND it's flagged mandatory. Confirmed (not tentative). |
+| `PRE-BID WALKTHROUGH: [<ref>] <project>` | Email mentions a non-mandatory walkthrough. Tentative. |
+
+The `[<ref>]` prefix is included automatically when the LLM finds a
+solicitation / IFB / RFP number in the email. Calendar event bodies always
+include both `bid_contact` and (when distinct) `pre_bid_contact`.
 
 The pre-bid event's location is set to the physical address when in-person, or
 to the virtual meeting link when virtual. If both are present (hybrid), the
@@ -453,6 +464,30 @@ much higher `bid_confidence`, which is what gates auto-blocking the calendar.
 | `COMPANY_ALIASES=BPC,Blueprint` | Acronyms / nicknames. Comma-separated. |
 | `AUTO_BLOCK_BID_REMINDER=1` | `0` to disable auto-creating bid deadline reminders (pre-bid walkthroughs are still blocked). |
 | `AUTO_BLOCK_CONFIDENCE=0.75` | Same threshold gates meeting blocking, bid reminders, pre-bid blocking, and document capture. |
+
+### Test the analyzer against a saved email (no side effects)
+
+Save a real bid email body (with optional `Subject:`/`From:`/`To:`/`Date:`
+headers at the top, separated from the body by a blank line) to a `.txt`
+file, then run the analyzer locally and inspect what it would extract.
+This does NOT touch your mailbox, calendar, or notification channels - it
+only calls your configured LLM.
+
+```powershell
+# Provided sample email (Texas DPS Mt Pleasant IFB):
+python tools\test_analyze.py samples\dps_mt_pleasant_ifb.txt --bid-only
+
+# Your own email saved to a file:
+python tools\test_analyze.py path\to\my_bid_email.txt
+
+# Override metadata if your file has no headers:
+python tools\test_analyze.py body_only.txt --subject "ITB - Project XYZ" --from "gc@example.com"
+```
+
+The `--bid-only` flag prints just the bid-related fields. Without it, you
+get the full `Analysis` dump including meeting fields, urgency, and the
+notification text the agent would send. Useful for prompt tuning before
+pointing the agent at production mail.
 
 ## Bid document capture
 
