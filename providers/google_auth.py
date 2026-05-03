@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar",
+    # `drive.file` = per-file access for files this app creates. Doesn't
+    # require Google verification; safe for personal use.
+    "https://www.googleapis.com/auth/drive.file",
 ]
 
 

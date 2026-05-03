@@ -63,6 +63,12 @@ class Settings:
     company_aliases: list[str] = field(default_factory=list)   # e.g. ["BPC", "Blueprint"]
     auto_block_bid_reminder: bool = True    # create calendar reminder at bid due time
 
+    # Document capture for bid emails
+    auto_download_bid_docs: bool = True
+    bid_docs_base_folder: str = "Email Assistant/Bids"
+    download_docs_from_links: bool = True
+    max_download_mb: int = 200
+
     # Provider selection: "outlook" (Microsoft 365) or "gmail" (Google Workspace / consumer Gmail).
     email_provider: str = "outlook"
 
@@ -152,6 +158,10 @@ def load_settings() -> Settings:
         company_name=_get("COMPANY_NAME", ""),
         company_aliases=_get_list("COMPANY_ALIASES", []),
         auto_block_bid_reminder=_get("AUTO_BLOCK_BID_REMINDER", "1") not in ("0", "", "false", "False"),
+        auto_download_bid_docs=_get("AUTO_DOWNLOAD_BID_DOCS", "1") not in ("0", "", "false", "False"),
+        bid_docs_base_folder=_get("BID_DOCS_BASE_FOLDER", "Email Assistant/Bids"),
+        download_docs_from_links=_get("DOWNLOAD_DOCS_FROM_LINKS", "1") not in ("0", "", "false", "False"),
+        max_download_mb=_get_int("MAX_DOWNLOAD_MB", 200),
         email_provider=email_provider,
         ms_client_id=_get("MS_CLIENT_ID", ""),
         ms_tenant_id=_get("MS_TENANT_ID", "common"),

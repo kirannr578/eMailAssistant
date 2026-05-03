@@ -1,6 +1,7 @@
 """Outlook mail access via Microsoft Graph."""
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from datetime import datetime
@@ -9,12 +10,12 @@ from html import unescape
 import requests
 from dateutil import parser as date_parser
 
-from .base import EmailMessage  # re-exported for backward compatibility
+from .base import EmailAttachment, EmailMessage
 from .ms_graph_auth import GRAPH_BASE_URL, GraphAuth
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["EmailMessage", "OutlookClient"]
+__all__ = ["EmailAttachment", "EmailMessage", "OutlookClient"]
 
 
 def _strip_html(html: str) -> str:
@@ -76,6 +77,54 @@ class OutlookClient:
         if resp.status_code >= 400:
             logger.error("Graph mark_read failed: %s %s", resp.status_code, resp.text)
             resp.raise_for_status()
+
+    # ----------------------------------------------------------------
+    # Attachments
+    # ----------------------------------------------------------------
+    def list_attachments(self, message_id: str) -> list[EmailAttachment]:
+        # Filter out inline attachments (embedded images in the body).
+        url = f"{GRAPH_BASE_URL}/me/messages/{message_id}/attachments"
+        params = {
+            "$select": "id,name,size,contentType,isInline",
+            "$top": "50",
+        }
+        resp = requests.get(url, headers=self._headers(), params=params, timeout=30)
+        if resp.status_code >= 400:
+            logger.error("Graph list_attachments failed: %s %s", resp.status_code, resp.text)
+            resp.raise_for_status()
+        out: list[EmailAttachment] = []
+        for it in resp.json().get("value", []):
+            if it.get("isInline"):
+                continue
+            # Only file attachments; skip itemAttachment (forwarded emails) etc.
+            if it.get("@odata.type") and "fileAttachment" not in it["@odata.type"]:
+                continue
+            out.append(EmailAttachment(
+                id=it["id"],
+                filename=it.get("name") or "untitled",
+                size_bytes=int(it.get("size") or 0),
+                content_type=it.get("contentType") or "application/octet-stream",
+            ))
+        return out
+
+    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        # Use $value to get raw bytes; otherwise we'd get base64 in JSON.
+        url = f"{GRAPH_BASE_URL}/me/messages/{message_id}/attachments/{attachment_id}/$value"
+        resp = requests.get(url, headers=self._headers(), timeout=120)
+        if resp.status_code == 404 or not resp.content:
+            # Some referenceAttachments don't have $value; fall back to JSON.
+            jurl = f"{GRAPH_BASE_URL}/me/messages/{message_id}/attachments/{attachment_id}"
+            jresp = requests.get(jurl, headers=self._headers(), timeout=120)
+            jresp.raise_for_status()
+            data = jresp.json()
+            cb = data.get("contentBytes")
+            if not cb:
+                raise RuntimeError(f"Attachment {attachment_id} has no downloadable content")
+            return base64.b64decode(cb)
+        if resp.status_code >= 400:
+            logger.error("Graph download_attachment failed: %s %s", resp.status_code, resp.text)
+            resp.raise_for_status()
+        return resp.content
 
     @staticmethod
     def _to_message(raw: dict) -> EmailMessage:

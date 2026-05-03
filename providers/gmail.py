@@ -13,7 +13,7 @@ from typing import Any
 from dateutil import parser as date_parser
 from googleapiclient.discovery import build
 
-from .base import EmailMessage
+from .base import EmailAttachment, EmailMessage
 from .google_auth import GoogleAuth
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,42 @@ class GmailClient:
             id=message_id,
             body={"removeLabelIds": ["UNREAD"]},
         ).execute()
+
+    # ----------------------------------------------------------------
+    # Attachments
+    # ----------------------------------------------------------------
+    def list_attachments(self, message_id: str) -> list[EmailAttachment]:
+        msg = self._svc().users().messages().get(
+            userId="me", id=message_id, format="full",
+        ).execute()
+        out: list[EmailAttachment] = []
+        self._collect_parts(msg.get("payload") or {}, out)
+        return out
+
+    def _collect_parts(self, part: dict, out: list[EmailAttachment]) -> None:
+        # Walk the MIME tree; collect leaves with non-empty filename.
+        for child in part.get("parts") or []:
+            self._collect_parts(child, out)
+        filename = part.get("filename") or ""
+        body = part.get("body") or {}
+        att_id = body.get("attachmentId")
+        if filename and att_id:
+            mime = part.get("mimeType") or "application/octet-stream"
+            out.append(EmailAttachment(
+                id=att_id,
+                filename=filename,
+                size_bytes=int(body.get("size") or 0),
+                content_type=mime,
+            ))
+
+    def download_attachment(self, message_id: str, attachment_id: str) -> bytes:
+        att = self._svc().users().messages().attachments().get(
+            userId="me", messageId=message_id, id=attachment_id,
+        ).execute()
+        data = att.get("data") or ""
+        if not data:
+            return b""
+        return base64.urlsafe_b64decode(data.encode("ascii"))
 
     @staticmethod
     def _to_message(mid: str, raw_resp: dict, meta_resp: dict) -> EmailMessage:

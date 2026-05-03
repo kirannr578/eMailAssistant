@@ -53,17 +53,28 @@ Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 ├── main.py                 # Entry point: --setup | --auth | --once | (default loop)
 ├── setup_wizard.py         # Interactive .env builder with live credential validation
 ├── config.py               # Typed Settings loaded from .env
-├── analyzer.py             # OpenAI JSON-mode analysis + Pydantic schema
+├── analyzer.py             # LLM JSON-mode analysis + Pydantic schema (meetings + bids)
+├── document_downloader.py  # URL extraction + safe document download from email bodies
 ├── state.py                # SQLite dedup of processed messages
 ├── providers/
-│   ├── ms_graph_auth.py    # MSAL device-code OAuth + token cache
-│   ├── outlook.py          # Graph: list unread, mark read
+│   ├── base.py             # Provider-agnostic Protocol interfaces
+│   ├── ms_graph_auth.py    # MSAL device-code OAuth + token cache (Microsoft)
+│   ├── outlook.py          # Graph: list unread, mark read, attachments
 │   ├── calendar.py         # Graph: create event
-│   └── notifier.py         # Twilio SMS + WhatsApp (fail-soft per channel)
+│   ├── onedrive.py         # Graph: ensure folder, upload (small + chunked sessions)
+│   ├── google_auth.py      # Google OAuth (loopback redirect) + token cache
+│   ├── gmail.py            # Gmail API: list unread, mark read, attachments
+│   ├── google_calendar.py  # Google Calendar: create event
+│   ├── google_drive.py     # Google Drive: ensure folder, upload (drive.file scope)
+│   ├── telegram.py         # Telegram bot client + chat-id auto-discovery
+│   ├── whatsapp_meta.py    # Meta WhatsApp Cloud API client
+│   └── notifier.py         # Multi-channel dispatcher (Telegram / WA / SMS)
 ├── scripts/
 │   ├── setup_entra.ps1     # Auto-create Entra app via Azure CLI
 │   └── install_task.ps1    # Register / uninstall the Windows Scheduled Task
-├── tests/test_analyzer.py
+├── tests/
+│   ├── test_analyzer.py
+│   └── test_document_downloader.py
 ├── requirements.txt
 ├── .env.example
 └── README.md
@@ -390,6 +401,49 @@ Tweak the behavior:
 | `AUTO_BLOCK_BID_REMINDER=1` | `0` to disable auto-creating bid deadline reminders. |
 | `AUTO_BLOCK_CONFIDENCE=0.75` | Same threshold gates both meeting blocking and bid reminders. |
 
+## Bid document capture
+
+When the agent flags a high-confidence bid request, it can also pull the
+attached plans / specs and any document links in the body straight into your
+cloud drive so they're ready when you sit down to estimate.
+
+What gets captured:
+
+| Source | Behavior |
+|---|---|
+| Email attachments | Downloaded directly via Graph (Outlook) or Gmail API. |
+| URLs in the email body | Extracted, classified, and downloaded if they look like documents. |
+| Known document hosts | Dropbox, WeTransfer, SharePoint, OneDrive share links, Google Drive, Box. |
+| Authenticated bid portals | **Skipped automatically** with a log line. Procore, BuildingConnected, PlanGrid / Autodesk Construction Cloud, iSqFt / ConstructConnect, SmartBidNet, Bluebeam Studio require login and aren't auto-fetchable. The link is still surfaced in your notification so you can open it manually. |
+
+Where files land:
+
+- `EMAIL_PROVIDER=outlook` -> **OneDrive** under `Email Assistant/Bids/<Project Name>/`
+- `EMAIL_PROVIDER=gmail`  -> **Google Drive** under the same folder layout (drive.file scope, so the agent only sees files it created)
+
+Folder names are taken from the LLM's extracted `bid_project_name` (falling
+back to the email subject), then sanitized to be filesystem-safe (no
+`/ \ : * ? " < > |`, no trailing dots, capped at 120 chars).
+
+The notification text has `| N doc(s) saved -> <folder url>` appended when
+files are captured, so you can jump straight to them from Telegram /
+WhatsApp.
+
+Tweak the behavior:
+
+| Env var | Effect |
+|---|---|
+| `AUTO_DOWNLOAD_BID_DOCS=1` | `0` to disable document capture entirely. |
+| `BID_DOCS_BASE_FOLDER=Email Assistant/Bids` | Root folder under your drive. |
+| `DOWNLOAD_DOCS_FROM_LINKS=1` | `0` to capture attachments only (no body URLs). |
+| `MAX_DOWNLOAD_MB=200` | Per-file size cap. Files larger than this are skipped + logged. |
+
+The Outlook setup script (`scripts/setup_entra.ps1`) now requests
+`Files.ReadWrite` automatically. Gmail's OAuth flow now requests
+`drive.file`. If you ran the setup before this feature shipped, simply
+re-run the OAuth step (`python main.py --auth`) to pick up the new scopes
+and re-consent.
+
 ## Configuration reference
 
 All knobs live in `.env` (see `.env.example` for documented examples):
@@ -413,6 +467,10 @@ All knobs live in `.env` (see `.env.example` for documented examples):
 | `META_WA_RECIPIENT` | Your WhatsApp number, digits only (no `+`). E.g. `15125551234`. |
 | `META_WA_TEMPLATE_NAME` | Optional: name of an APPROVED Meta template used as fallback when WhatsApp's 24-hour session window is closed. |
 | `AUTO_BLOCK_CONFIDENCE` | Calendar is auto-blocked only when the LLM's confidence >= this threshold. Default 0.75. |
+| `AUTO_DOWNLOAD_BID_DOCS` | `1` (default) to copy bid attachments + document links into OneDrive/Drive; `0` to disable. |
+| `BID_DOCS_BASE_FOLDER` | Cloud-drive folder under which per-project subfolders are created. Default `Email Assistant/Bids`. |
+| `DOWNLOAD_DOCS_FROM_LINKS` | `1` (default) to download document URLs found in the email body. `0` for attachments only. |
+| `MAX_DOWNLOAD_MB` | Per-file size cap for the doc capture step. Default 200. |
 | `POLL_INTERVAL_SECONDS` | Polling cadence for the long-running mode. |
 | `INITIAL_LOOKBACK_MINUTES` | On startup, scan unread mail received in this window so you don't lose anything across restarts. |
 
@@ -421,12 +479,21 @@ All knobs live in `.env` (see `.env.example` for documented examples):
 For every unread email since the last successful poll:
 
 1. Skip if its message ID is already in the local SQLite state (`state.db`).
-2. Send subject + body + sender + your timezone to OpenAI with a strict JSON schema.
-3. If `is_meeting_request` and `confidence >= AUTO_BLOCK_CONFIDENCE`, create an
-   Outlook event via Graph (tentative below 0.9, busy at >= 0.9).
-4. Send a one-line SMS and/or WhatsApp notification via Twilio with the summary
-   and what was done.
-5. Mark the message read via Graph and record the result in SQLite.
+2. Send subject + body + sender + your timezone to the configured LLM with a
+   strict JSON schema.
+3. If `is_meeting_request` and `meeting_confidence >= AUTO_BLOCK_CONFIDENCE`,
+   create a calendar event via the configured calendar provider (tentative
+   below 0.9, busy at >= 0.9).
+4. If `is_bid_request` and `bid_confidence >= AUTO_BLOCK_CONFIDENCE`:
+   - create a `BID DUE: <project>` reminder at the bid deadline (when known
+     and `AUTO_BLOCK_BID_REMINDER=1`);
+   - if `AUTO_DOWNLOAD_BID_DOCS=1`, copy attachments and any document links
+     in the body into OneDrive (Outlook) or Google Drive (Gmail) under
+     `<BID_DOCS_BASE_FOLDER>/<sanitized project name>/`. Authenticated bid
+     portals (Procore / BuildingConnected / iSqFt / etc.) are skipped.
+5. Send a one-line notification via every enabled channel
+   (Telegram / WhatsApp / SMS), summarizing what was found and done.
+6. Mark the message read and record the result in SQLite.
 
 If anything in steps 3-5 fails, the loop logs the error and continues -
 de-duplication via SQLite means you won't get spammed on retries, and the email

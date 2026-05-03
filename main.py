@@ -20,7 +20,17 @@ from datetime import datetime, timedelta, timezone
 
 from analyzer import Analysis, EmailAnalyzer, derive_bid_reminder_window, derive_meeting_window
 from config import Settings, load_settings
-from providers.base import CalendarProvider, EmailMessage, EmailProvider
+from document_downloader import (
+    download_document,
+    extract_urls,
+    sanitize_folder_name,
+)
+from providers.base import (
+    CalendarProvider,
+    EmailMessage,
+    EmailProvider,
+    FileStorage,
+)
 from providers.notifier import Notifier, NotifierConfig
 from state import StateStore
 
@@ -38,11 +48,14 @@ def _setup_logging(debug: bool) -> None:
     logging.getLogger("msal").setLevel(logging.WARNING)
 
 
-def _build_email_and_calendar(settings: Settings) -> tuple[EmailProvider, CalendarProvider]:
-    """Construct provider clients based on EMAIL_PROVIDER."""
+def _build_email_calendar_storage(
+    settings: Settings,
+) -> tuple[EmailProvider, CalendarProvider, FileStorage | None]:
+    """Construct provider clients based on EMAIL_PROVIDER (incl. file storage)."""
     if settings.email_provider == "outlook":
         from providers.calendar import CalendarClient
         from providers.ms_graph_auth import GraphAuth
+        from providers.onedrive import OneDriveClient
         from providers.outlook import OutlookClient
 
         auth = GraphAuth(
@@ -50,17 +63,22 @@ def _build_email_and_calendar(settings: Settings) -> tuple[EmailProvider, Calend
             tenant_id=settings.ms_tenant_id,
             token_cache_path=settings.ms_token_cache_path,
         )
-        return OutlookClient(auth), CalendarClient(auth, user_timezone=settings.user_timezone)
+        storage: FileStorage | None = (
+            OneDriveClient(auth) if settings.auto_download_bid_docs else None
+        )
+        return OutlookClient(auth), CalendarClient(auth, user_timezone=settings.user_timezone), storage
 
     if settings.email_provider == "gmail":
         from providers.gmail import GmailClient
         from providers.google_auth import GoogleAuth
         from providers.google_calendar import GoogleCalendarClient
+        from providers.google_drive import GoogleDriveClient
 
         gauth = GoogleAuth(
             client_secrets_path=settings.google_client_secrets_path,
             token_cache_path=settings.google_token_cache_path,
         )
+        storage = GoogleDriveClient(gauth) if settings.auto_download_bid_docs else None
         return (
             GmailClient(gauth),
             GoogleCalendarClient(
@@ -68,13 +86,14 @@ def _build_email_and_calendar(settings: Settings) -> tuple[EmailProvider, Calend
                 user_timezone=settings.user_timezone,
                 calendar_id=settings.google_calendar_id,
             ),
+            storage,
         )
 
     raise RuntimeError(f"Unknown EMAIL_PROVIDER: {settings.email_provider}")
 
 
 def _build_components(settings: Settings):
-    email_client, calendar = _build_email_and_calendar(settings)
+    email_client, calendar, storage = _build_email_calendar_storage(settings)
     analyzer = EmailAnalyzer(
         provider=settings.llm_provider,
         api_key=settings.llm_api_key,
@@ -106,7 +125,93 @@ def _build_components(settings: Settings):
         )
     )
     state = StateStore(settings.state_db_path)
-    return email_client, calendar, analyzer, notifier, state
+    return email_client, calendar, analyzer, notifier, state, storage
+
+
+def _capture_bid_documents(
+    msg: EmailMessage,
+    analysis: Analysis,
+    *,
+    settings: Settings,
+    email_client: EmailProvider,
+    storage: FileStorage,
+) -> tuple[int, str | None]:
+    """Download attachments + body links for a bid email into cloud storage.
+
+    Returns (uploaded_count, folder_link). Best-effort; never raises.
+    """
+    project = analysis.bid_project_name or msg.subject
+    folder_segment = sanitize_folder_name(project)
+    folder_path = f"{settings.bid_docs_base_folder.strip('/')}/{folder_segment}"
+
+    max_bytes = settings.max_download_mb * 1024 * 1024
+    uploaded = 0
+
+    # 1) Email attachments
+    try:
+        attachments = email_client.list_attachments(msg.id)
+    except Exception as e:
+        logger.warning("  -> list_attachments failed: %s", e)
+        attachments = []
+
+    for att in attachments:
+        if att.size_bytes and att.size_bytes > max_bytes:
+            logger.warning("  -> skipping attachment %s (%d bytes > cap)",
+                           att.filename, att.size_bytes)
+            continue
+        try:
+            content = email_client.download_attachment(msg.id, att.id)
+        except Exception as e:
+            logger.warning("  -> download_attachment %s failed: %s", att.filename, e)
+            continue
+        if not content:
+            continue
+        if len(content) > max_bytes:
+            logger.warning("  -> skipping %s after download (size %d > cap)",
+                           att.filename, len(content))
+            continue
+        try:
+            storage.upload(
+                folder_path=folder_path,
+                filename=att.filename,
+                content=content,
+                content_type=att.content_type,
+            )
+            uploaded += 1
+            logger.info("  -> uploaded attachment %s (%d bytes)", att.filename, len(content))
+        except Exception as e:
+            logger.warning("  -> upload of %s failed: %s", att.filename, e)
+
+    # 2) URLs in body
+    if settings.download_docs_from_links:
+        for url in extract_urls(msg.body_text):
+            try:
+                doc = download_document(url, max_bytes=max_bytes)
+            except Exception as e:
+                logger.warning("  -> document download error for %s: %s", url, e)
+                continue
+            if doc is None:
+                continue
+            try:
+                storage.upload(
+                    folder_path=folder_path,
+                    filename=doc.filename,
+                    content=doc.content,
+                    content_type=doc.content_type,
+                )
+                uploaded += 1
+                logger.info("  -> uploaded link doc %s (%d bytes)",
+                            doc.filename, len(doc.content))
+            except Exception as e:
+                logger.warning("  -> upload of %s failed: %s", doc.filename, e)
+
+    folder_link = None
+    if uploaded > 0:
+        try:
+            folder_link = storage.folder_link(folder_path)
+        except Exception:
+            pass
+    return uploaded, folder_link
 
 
 def _process_one(
@@ -117,6 +222,7 @@ def _process_one(
     calendar: CalendarProvider,
     notifier: Notifier,
     email_client: EmailProvider,
+    storage: FileStorage | None,
     state: StateStore,
 ) -> None:
     logger.info("Analyzing message %s | from=%s | subject=%r",
@@ -222,7 +328,40 @@ def _process_one(
 
     calendar_event_id = calendar_event_ids[0] if calendar_event_ids else None
 
-    notification_body = analysis.notification_text + calendar_action_note
+    # ---- Bid document capture ----
+    docs_action_note = ""
+    if (
+        analysis.is_bid_request
+        and analysis.bid_confidence >= settings.auto_block_confidence
+        and settings.auto_download_bid_docs
+        and storage is not None
+    ):
+        try:
+            count, folder_link = _capture_bid_documents(
+                msg, analysis,
+                settings=settings,
+                email_client=email_client,
+                storage=storage,
+            )
+            if count > 0:
+                project = analysis.bid_project_name or msg.subject
+                folder_segment = sanitize_folder_name(project)
+                if folder_link:
+                    docs_action_note = f" | {count} doc(s) saved -> {folder_link}"
+                else:
+                    docs_action_note = (
+                        f" | {count} doc(s) saved -> "
+                        f"{settings.bid_docs_base_folder}/{folder_segment}"
+                    )
+                logger.info("  -> %d bid document(s) captured for project '%s'",
+                            count, project)
+            else:
+                logger.info("  -> no bid documents found to capture")
+        except Exception as e:
+            logger.exception("  -> bid document capture failed: %s", e)
+            docs_action_note = " | doc capture FAILED"
+
+    notification_body = analysis.notification_text + calendar_action_note + docs_action_note
     notified = notifier.notify(notification_body)
     if notified:
         logger.info("  -> notification sent")
@@ -245,7 +384,7 @@ def _process_one(
 
 def run_once(settings: Settings) -> int:
     """Process all currently-unread messages once. Returns count processed."""
-    email_client, calendar, analyzer, notifier, state = _build_components(settings)
+    email_client, calendar, analyzer, notifier, state, storage = _build_components(settings)
 
     since = datetime.now(timezone.utc) - timedelta(
         minutes=settings.initial_lookback_minutes
@@ -266,6 +405,7 @@ def run_once(settings: Settings) -> int:
                 calendar=calendar,
                 notifier=notifier,
                 email_client=email_client,
+                storage=storage,
                 state=state,
             )
             processed += 1
@@ -275,7 +415,7 @@ def run_once(settings: Settings) -> int:
 
 
 def run_forever(settings: Settings) -> None:
-    email_client, calendar, analyzer, notifier, state = _build_components(settings)
+    email_client, calendar, analyzer, notifier, state, storage = _build_components(settings)
 
     stop = {"now": False}
 
@@ -314,6 +454,7 @@ def run_forever(settings: Settings) -> None:
                         calendar=calendar,
                         notifier=notifier,
                         email_client=email_client,
+                        storage=storage,
                         state=state,
                     )
                 except Exception:

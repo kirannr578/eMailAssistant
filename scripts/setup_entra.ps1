@@ -26,10 +26,11 @@ function Write-Warn2($msg){ Write-Host "    [!]  $msg" -ForegroundColor Yellow }
 # Microsoft Graph well-known identifiers - constant across all tenants.
 $GRAPH_APP_ID = "00000003-0000-0000-c000-000000000000"
 $PERMS = @(
-    @{ name = "Mail.ReadWrite";     id = "024d486e-b451-40bb-833d-3e66d98c5c73" },
+    @{ name = "Mail.ReadWrite";      id = "024d486e-b451-40bb-833d-3e66d98c5c73" },
     @{ name = "Calendars.ReadWrite"; id = "1ec239c2-d7c9-4623-a91a-a9775856bb36" },
-    @{ name = "User.Read";          id = "e1fe6dd8-ba31-4d61-89e7-88639da4683d" },
-    @{ name = "offline_access";     id = "7427e0e9-2fba-42fe-b0c0-848c9e6a8182" }
+    @{ name = "Files.ReadWrite";     id = "5c28f0bf-8a70-41f1-8ab2-9032436ddb65" },
+    @{ name = "User.Read";           id = "e1fe6dd8-ba31-4d61-89e7-88639da4683d" },
+    @{ name = "offline_access";      id = "7427e0e9-2fba-42fe-b0c0-848c9e6a8182" }
 )
 
 # -------------------------------------------------------------------
@@ -103,7 +104,7 @@ foreach ($p in $PERMS) {
 # 5. Try to grant admin consent. (Only works if signed-in user is an admin.)
 # -------------------------------------------------------------------
 Write-Step "Attempting to grant admin consent"
-az ad app permission grant --id $appId --api $GRAPH_APP_ID --scope "Mail.ReadWrite Calendars.ReadWrite User.Read offline_access" 2>$null | Out-Null
+az ad app permission grant --id $appId --api $GRAPH_APP_ID --scope "Mail.ReadWrite Calendars.ReadWrite Files.ReadWrite User.Read offline_access" 2>$null | Out-Null
 $adminConsent = az ad app permission admin-consent --id $appId 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Warn2 "Admin consent failed (likely you're not a tenant admin)."

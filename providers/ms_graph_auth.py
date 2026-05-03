@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 GRAPH_SCOPES = [
     "Mail.ReadWrite",
     "Calendars.ReadWrite",
+    "Files.ReadWrite",      # OneDrive: create folders + upload files
     "User.Read",
 ]
 # Note: msal automatically adds offline_access + openid + profile.
