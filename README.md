@@ -4,11 +4,16 @@ An autonomous agent that monitors a mailbox (Microsoft 365 **or** Gmail / Google
 Workspace), reads each new unread email with an LLM (OpenAI, GitHub Models,
 Azure OpenAI, or local Ollama), and:
 
-- Detects whether it's a **meeting request** (extracting the proposed time).
-- For high-confidence meeting requests, **blocks your Outlook calendar**
-  automatically (tentative or busy depending on confidence).
-- Sends a short **SMS and/or WhatsApp notification** via Twilio summarizing the
-  email and the action taken.
+- Detects whether it's a **meeting request** (extracting the proposed time)
+  and **blocks your calendar** automatically for high-confidence meetings
+  (tentative or busy depending on confidence).
+- Detects whether it's a **bid request** ("RFP", "RFQ", "ITB", "please quote",
+  "submit a bid for...") addressed to your company, extracts the project name,
+  location, scope, and **bid due date**, and **places a calendar reminder
+  exactly at the bid deadline** so you never miss a submittal window.
+- Sends a short **notification** (Telegram, WhatsApp via Meta, WhatsApp/SMS
+  via Twilio - any combination) summarizing the email and the action taken.
+  Bid notifications start with `[BID]`, meetings with `[MEETING]`.
 - Marks the email as read and remembers what it has already processed (SQLite),
   so restarts and crashes never re-act on the same message.
 
@@ -360,6 +365,31 @@ If the 7-day re-consent in Testing mode annoys you:
   can use them in Production mode for personal accounts indefinitely; only
   reverification is needed if you add restricted scopes).
 
+## Bid request handling
+
+Out of the box, the agent recognizes construction-style bid invitations and
+treats them as first-class events:
+
+| Signal in email | Agent's response |
+|---|---|
+| "Invitation to Bid", "RFP", "RFQ", "ITB", "Please submit a bid for...", "Plans attached for bid", "Bid due [date]" | Marked as `is_bid_request=true` |
+| Project name, location, scope, due date, contact | Extracted into structured fields |
+| Bid due date in the future | Calendar event created `BID DUE: <project>` AT the due time (configurable via `AUTO_BLOCK_BID_REMINDER`) |
+| Notification | Starts with `[BID]` and includes project + due date |
+
+The agent uses your `COMPANY_NAME` and `COMPANY_ALIASES` to recognize when a
+bid is specifically addressed to you (e.g. "BPC, please bid this project" gets
+much higher confidence than a generic mass invite).
+
+Tweak the behavior:
+
+| Env var | Effect |
+|---|---|
+| `COMPANY_NAME=Blueprint Constructs` | Full company name. Helps the LLM recognize "to/for/with us". |
+| `COMPANY_ALIASES=BPC,Blueprint` | Acronyms / nicknames. Comma-separated. |
+| `AUTO_BLOCK_BID_REMINDER=1` | `0` to disable auto-creating bid deadline reminders. |
+| `AUTO_BLOCK_CONFIDENCE=0.75` | Same threshold gates both meeting blocking and bid reminders. |
+
 ## Configuration reference
 
 All knobs live in `.env` (see `.env.example` for documented examples):
@@ -370,6 +400,8 @@ All knobs live in `.env` (see `.env.example` for documented examples):
 | `USER_TIMEZONE` | IANA timezone (e.g. `America/New_York`, `Europe/London`, `Asia/Singapore`). Used for parsing relative times and creating calendar events. The setup wizard auto-detects this from your machine. |
 | `DEFAULT_MEETING_DURATION_MINUTES` | Used when an email proposes a start time but no end. |
 | `MS_CLIENT_ID`, `MS_TENANT_ID` | App-registration identifiers. |
+| `COMPANY_NAME`, `COMPANY_ALIASES` | Your company's full name and short aliases. Helps detect bid invitations addressed to you. |
+| `AUTO_BLOCK_BID_REMINDER` | `1` (default) to auto-create a calendar reminder at the bid due time; `0` to disable. |
 | `EMAIL_PROVIDER` | `outlook` or `gmail`. Determines which providers are used. |
 | `LLM_PROVIDER` | `openai`, `azure_openai`, `github_models`, `ollama`, or `openai_compat`. |
 | `LLM_MODEL` | Provider-specific model name. For Azure, this is the *deployment* name. |

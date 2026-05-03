@@ -58,8 +58,13 @@ class Settings:
     user_timezone: str
     default_meeting_duration_minutes: int
 
+    # Company / org context (helps the LLM recognize bid invitations addressed to you)
+    company_name: str = ""                  # e.g. "Blueprint Constructs"
+    company_aliases: list[str] = field(default_factory=list)   # e.g. ["BPC", "Blueprint"]
+    auto_block_bid_reminder: bool = True    # create calendar reminder at bid due time
+
     # Provider selection: "outlook" (Microsoft 365) or "gmail" (Google Workspace / consumer Gmail).
-    email_provider: str
+    email_provider: str = "outlook"
 
     # Microsoft Graph (only required if email_provider == "outlook")
     ms_client_id: str = ""
@@ -144,6 +149,9 @@ def load_settings() -> Settings:
         mailbox_address=_get("MAILBOX_ADDRESS", required=True),
         user_timezone=_get("USER_TIMEZONE", required=True),
         default_meeting_duration_minutes=_get_int("DEFAULT_MEETING_DURATION_MINUTES", 30),
+        company_name=_get("COMPANY_NAME", ""),
+        company_aliases=_get_list("COMPANY_ALIASES", []),
+        auto_block_bid_reminder=_get("AUTO_BLOCK_BID_REMINDER", "1") not in ("0", "", "false", "False"),
         email_provider=email_provider,
         ms_client_id=_get("MS_CLIENT_ID", ""),
         ms_tenant_id=_get("MS_TENANT_ID", "common"),

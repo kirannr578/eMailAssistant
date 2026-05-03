@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-from analyzer import Analysis, EmailAnalyzer, derive_meeting_window
+from analyzer import Analysis, EmailAnalyzer, derive_bid_reminder_window, derive_meeting_window
 from config import Settings, load_settings
 from providers.base import CalendarProvider, EmailMessage, EmailProvider
 from providers.notifier import Notifier, NotifierConfig
@@ -83,6 +83,8 @@ def _build_components(settings: Settings):
         base_url=settings.llm_base_url,
         azure_endpoint=settings.azure_openai_endpoint,
         azure_api_version=settings.azure_openai_api_version,
+        company_name=settings.company_name,
+        company_aliases=settings.company_aliases,
     )
     notifier = Notifier(
         NotifierConfig(
@@ -128,26 +130,30 @@ def _process_one(
         received_at=msg.received_at,
     )
     logger.info(
-        "  -> meeting=%s confidence=%.2f urgency=%s",
-        analysis.is_meeting_request, analysis.confidence, analysis.urgency,
+        "  -> meeting=%s (%.2f) bid=%s (%.2f) urgency=%s",
+        analysis.is_meeting_request, analysis.meeting_confidence,
+        analysis.is_bid_request, analysis.bid_confidence,
+        analysis.urgency,
     )
 
-    calendar_event_id: str | None = None
+    calendar_event_ids: list[str] = []
     calendar_action_note = ""
+
+    # ---- Meeting request: block the meeting time on the calendar ----
     if (
         analysis.is_meeting_request
-        and analysis.confidence >= settings.auto_block_confidence
+        and analysis.meeting_confidence >= settings.auto_block_confidence
     ):
         window = derive_meeting_window(
             analysis,
             default_duration_minutes=settings.default_meeting_duration_minutes,
         )
         if window is None:
-            calendar_action_note = " (no time parsed)"
+            calendar_action_note += " (no meeting time parsed)"
         else:
             start, end = window
             try:
-                calendar_event_id = calendar.create_event(
+                eid = calendar.create_event(
                     subject=f"[Auto] {analysis.meeting_title or msg.subject}",
                     start=start,
                     end=end,
@@ -164,13 +170,57 @@ def _process_one(
                         if "@" in a and a.lower() != settings.mailbox_address.lower()
                     ],
                     location=analysis.location,
-                    is_tentative=analysis.confidence < 0.9,
+                    is_tentative=analysis.meeting_confidence < 0.9,
                 )
-                calendar_action_note = f" | calendar event created ({start:%a %b %d %H:%M})"
-                logger.info("  -> calendar event %s created", calendar_event_id)
+                calendar_event_ids.append(eid)
+                calendar_action_note += f" | meeting blocked ({start:%a %b %d %H:%M})"
+                logger.info("  -> meeting event %s created", eid)
             except Exception as e:
-                logger.exception("  -> calendar create_event failed: %s", e)
-                calendar_action_note = " | calendar create FAILED"
+                logger.exception("  -> meeting create_event failed: %s", e)
+                calendar_action_note += " | meeting block FAILED"
+
+    # ---- Bid request: place a reminder AT the bid due time ----
+    if (
+        analysis.is_bid_request
+        and analysis.bid_confidence >= settings.auto_block_confidence
+        and settings.auto_block_bid_reminder
+    ):
+        window = derive_bid_reminder_window(analysis)
+        if window is None:
+            if analysis.bid_due_date_iso:
+                calendar_action_note += " (bid due date in the past, no reminder)"
+            else:
+                calendar_action_note += " (no bid due date parsed)"
+        else:
+            start, end = window
+            project = analysis.bid_project_name or msg.subject
+            try:
+                eid = calendar.create_event(
+                    subject=f"BID DUE: {project}",
+                    start=start,
+                    end=end,
+                    body_text=(
+                        f"Auto-created bid deadline reminder by Email Assistant.\n\n"
+                        f"From: {msg.sender}\n"
+                        f"Project: {analysis.bid_project_name or '(see email)'}\n"
+                        f"Location: {analysis.bid_project_location or '(see email)'}\n"
+                        f"Scope: {analysis.bid_scope_summary or '(see email)'}\n"
+                        f"Submit to: {analysis.bid_contact or '(see email)'}\n\n"
+                        f"Summary: {analysis.summary}\n"
+                        f"Suggested action: {analysis.suggested_action}\n\n"
+                        f"Original email: {msg.web_link or '(link unavailable)'}"
+                    ),
+                    location=analysis.bid_project_location,
+                    is_tentative=analysis.bid_confidence < 0.9,
+                )
+                calendar_event_ids.append(eid)
+                calendar_action_note += f" | bid deadline blocked ({start:%a %b %d %H:%M})"
+                logger.info("  -> bid reminder event %s created", eid)
+            except Exception as e:
+                logger.exception("  -> bid reminder create_event failed: %s", e)
+                calendar_action_note += " | bid reminder FAILED"
+
+    calendar_event_id = calendar_event_ids[0] if calendar_event_ids else None
 
     notification_body = analysis.notification_text + calendar_action_note
     notified = notifier.notify(notification_body)
@@ -187,7 +237,7 @@ def _process_one(
     state.mark_processed(
         msg.id,
         is_meeting=analysis.is_meeting_request,
-        confidence=analysis.confidence,
+        confidence=max(analysis.meeting_confidence, analysis.bid_confidence),
         calendar_event_id=calendar_event_id,
         notified=notified,
     )

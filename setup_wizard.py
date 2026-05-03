@@ -203,8 +203,8 @@ def run_wizard() -> int:
 
     values = _load_template()
 
-    # ---------- Mailbox ----------
-    _h2("1/5  Mailbox")
+    # ---------- Mailbox + company ----------
+    _h2("1/5  Mailbox + your company")
     mailbox_default = values.get("MAILBOX_ADDRESS") or None
     values["MAILBOX_ADDRESS"] = _ask(
         "Mailbox to monitor (full email)", default=mailbox_default
@@ -214,6 +214,16 @@ def run_wizard() -> int:
     values["USER_TIMEZONE"] = _ask(
         "Your IANA timezone (e.g. America/New_York, Europe/London, Asia/Singapore)",
         default=tz_default,
+    )
+    _info("\nThe company you work for. Helps the LLM detect bid invitations addressed to you.")
+    _info("Leave blank to skip bid-request detection tuning.")
+    values["COMPANY_NAME"] = _ask(
+        "Your company name (full name, e.g. 'Blueprint Constructs')",
+        default=values.get("COMPANY_NAME") or "",
+    )
+    values["COMPANY_ALIASES"] = _ask(
+        "Company aliases / acronyms, comma-separated (e.g. 'BPC,Blueprint')",
+        default=values.get("COMPANY_ALIASES") or "",
     )
 
     # ---------- Email + Calendar provider ----------

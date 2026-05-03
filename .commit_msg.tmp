@@ -1,0 +1,49 @@
+Detect bid invitations and auto-block calendar at the bid deadline
+
+Adds first-class handling of construction-style bid requests (RFP/RFQ/ITB,
+"please submit a bid", "plans attached for bid", etc.) alongside the
+existing meeting-request detection.
+
+Analyzer (analyzer.py)
+- Analysis schema gains: is_bid_request, bid_confidence, bid_project_name,
+  bid_project_location, bid_due_date_iso, bid_scope_summary, bid_contact.
+- Renamed `confidence` -> `meeting_confidence`; backward-compat .confidence
+  property aliases meeting_confidence so any external readers keep working.
+- New _SYSTEM_PROMPT_TEMPLATE teaches the LLM to classify on TWO independent
+  axes (meeting + bid). It is parameterized with the user's company name
+  and aliases so "BPC, please bid this" gets recognized as targeted, not
+  generic mass invitation.
+- _company_context() helper formats the prompt section.
+- New derive_bid_reminder_window() returns a (start, end) at the bid due
+  time, returning None when the deadline is already past.
+
+Agent loop (main.py)
+- Passes company_name + company_aliases to EmailAnalyzer.
+- _process_one() now runs two independent calendar actions:
+    * meeting block (existing): at proposed meeting time.
+    * bid reminder (new):       30-min event titled "BID DUE: <project>"
+                                placed AT the bid deadline.
+  Both are gated by AUTO_BLOCK_CONFIDENCE; bid reminder additionally gated
+  by AUTO_BLOCK_BID_REMINDER (default on).
+- Notification body now reflects whichever action(s) fired.
+- State store records max(meeting_confidence, bid_confidence) for dedup.
+
+Config + .env.example
+- New: COMPANY_NAME, COMPANY_ALIASES, AUTO_BLOCK_BID_REMINDER.
+- Settings.email_provider given default "outlook" so dataclass field
+  ordering stays valid as new defaulted fields land.
+
+Wizard (setup_wizard.py)
+- Section 1 now also asks for company name + comma-separated aliases.
+
+Tests (tests/test_analyzer.py)
+- All existing meeting tests updated to use meeting_confidence.
+- New tests cover: bid window in future, bid in past, no due date,
+  ISO normalization, confidence range validation, company-context helper.
+- 9 new tests, total 16/16 pass.
+
+README
+- Top-of-doc summary updated to mention bid handling.
+- New "Bid request handling" section explains signals, calendar action,
+  and tunable env vars.
+- Config reference updated.
