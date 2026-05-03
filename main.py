@@ -61,6 +61,12 @@ def _build_components(settings: Settings):
             from_whatsapp=settings.twilio_from_whatsapp,
             to_sms=settings.notify_to_sms,
             to_whatsapp=settings.notify_to_whatsapp,
+            meta_phone_number_id=settings.meta_wa_phone_number_id,
+            meta_access_token=settings.meta_wa_access_token,
+            meta_recipient=settings.meta_wa_recipient,
+            meta_template_name=settings.meta_wa_template_name,
+            meta_template_language=settings.meta_wa_template_language,
+            meta_api_version=settings.meta_wa_api_version,
             channels=settings.notify_channels,
         )
     )

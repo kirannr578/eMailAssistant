@@ -74,6 +74,16 @@ class Settings:
     twilio_from_whatsapp: str
     notify_to_sms: str
     notify_to_whatsapp: str
+
+    # Meta WhatsApp Cloud API (direct)
+    meta_wa_phone_number_id: str = ""
+    meta_wa_access_token: str = ""
+    meta_wa_recipient: str = ""           # E.164 WITHOUT '+', e.g. "15125551234"
+    meta_wa_template_name: str = ""       # optional fallback template
+    meta_wa_template_language: str = "en_US"
+    meta_wa_api_version: str = "v21.0"
+
+    # Subset of {sms, whatsapp, whatsapp_meta}
     notify_channels: list[str] = field(default_factory=list)
 
     # Agent
@@ -100,7 +110,13 @@ def load_settings() -> Settings:
         twilio_from_whatsapp=_get("TWILIO_FROM_WHATSAPP", ""),
         notify_to_sms=_get("NOTIFY_TO_SMS", ""),
         notify_to_whatsapp=_get("NOTIFY_TO_WHATSAPP", ""),
-        notify_channels=_get_list("NOTIFY_CHANNELS", ["sms", "whatsapp"]),
+        meta_wa_phone_number_id=_get("META_WA_PHONE_NUMBER_ID", ""),
+        meta_wa_access_token=_get("META_WA_ACCESS_TOKEN", ""),
+        meta_wa_recipient=_get("META_WA_RECIPIENT", ""),
+        meta_wa_template_name=_get("META_WA_TEMPLATE_NAME", ""),
+        meta_wa_template_language=_get("META_WA_TEMPLATE_LANGUAGE", "en_US"),
+        meta_wa_api_version=_get("META_WA_API_VERSION", "v21.0"),
+        notify_channels=_get_list("NOTIFY_CHANNELS", ["whatsapp_meta"]),
         poll_interval_seconds=_get_int("POLL_INTERVAL_SECONDS", 60),
         auto_block_confidence=_get_float("AUTO_BLOCK_CONFIDENCE", 0.75),
         initial_lookback_minutes=_get_int("INITIAL_LOOKBACK_MINUTES", 60),

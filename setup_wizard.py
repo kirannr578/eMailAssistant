@@ -198,51 +198,98 @@ def run_wizard() -> int:
     values["OPENAI_API_KEY"] = openai_key
     values["OPENAI_MODEL"] = model
 
-    # ---------- Twilio ----------
-    _h2("4/5  Twilio (SMS + WhatsApp)")
-    _info("Sign up at https://www.twilio.com/try-twilio - trial gives ~$15 credit.")
-    while True:
-        sid = _ask("TWILIO_ACCOUNT_SID (starts with AC)")
-        token = _ask("TWILIO_AUTH_TOKEN", secret=True)
-        if _validate_twilio(sid, token):
-            break
-        if not _ask_yes_no("Re-enter Twilio credentials?", default=True):
-            break
-    values["TWILIO_ACCOUNT_SID"] = sid
-    values["TWILIO_AUTH_TOKEN"] = token
+    # ---------- Notification channels ----------
+    _h2("4/5  Notification channels")
+    _info("Pick how you want to be notified. You can enable more than one.")
+    print()
+    print("    [1] WhatsApp via Meta Cloud API direct  (free up to 1000/mo)")
+    print("    [2] WhatsApp via Twilio                 (sandbox is free)")
+    print("    [3] SMS via Twilio                      (real SMS, paid)")
+    print()
+    pick = _ask("Pick one or more (e.g. '1' or '1,3')", default="1").strip()
+    chosen = {p.strip() for p in pick.split(",") if p.strip()}
 
     channels: list[str] = []
-    if _ask_yes_no("Send SMS notifications?", default=True):
-        channels.append("sms")
-        while True:
-            from_sms = _ask("TWILIO_FROM_SMS (your Twilio number, E.164 e.g. +15125551234)")
-            if _validate_e164(from_sms):
-                break
-            _err("Must be E.164 format starting with + and country code.")
-        while True:
-            to_sms = _ask("NOTIFY_TO_SMS (your phone, E.164)")
-            if _validate_e164(to_sms):
-                break
-            _err("Must be E.164 format.")
-        values["TWILIO_FROM_SMS"] = from_sms
-        values["NOTIFY_TO_SMS"] = to_sms
+    twilio_needed = bool(chosen & {"2", "3"})
+    meta_needed = "1" in chosen
 
-    if _ask_yes_no("Send WhatsApp notifications?", default=True):
-        channels.append("whatsapp")
-        _info("Sandbox sender is whatsapp:+14155238886 (free; pre-filled).")
-        from_wa = _ask(
-            "TWILIO_FROM_WHATSAPP",
-            default=values.get("TWILIO_FROM_WHATSAPP", "whatsapp:+14155238886"),
+    # Twilio (only if user picked SMS or Twilio WhatsApp)
+    if twilio_needed:
+        _info("\nTwilio creds (sign up free at https://www.twilio.com/try-twilio):")
+        while True:
+            sid = _ask("TWILIO_ACCOUNT_SID (starts with AC)")
+            token = _ask("TWILIO_AUTH_TOKEN", secret=True)
+            if _validate_twilio(sid, token):
+                break
+            if not _ask_yes_no("Re-enter Twilio credentials?", default=True):
+                break
+        values["TWILIO_ACCOUNT_SID"] = sid
+        values["TWILIO_AUTH_TOKEN"] = token
+
+        if "3" in chosen:  # SMS
+            channels.append("sms")
+            while True:
+                from_sms = _ask("TWILIO_FROM_SMS (your Twilio number, E.164 e.g. +15125551234)")
+                if _validate_e164(from_sms):
+                    break
+                _err("Must be E.164 format starting with + and country code.")
+            while True:
+                to_sms = _ask("NOTIFY_TO_SMS (your phone, E.164)")
+                if _validate_e164(to_sms):
+                    break
+                _err("Must be E.164 format.")
+            values["TWILIO_FROM_SMS"] = from_sms
+            values["NOTIFY_TO_SMS"] = to_sms
+
+        if "2" in chosen:  # Twilio WhatsApp
+            channels.append("whatsapp")
+            _info("Sandbox sender is whatsapp:+14155238886 (free; pre-filled).")
+            from_wa = _ask(
+                "TWILIO_FROM_WHATSAPP",
+                default=values.get("TWILIO_FROM_WHATSAPP", "whatsapp:+14155238886"),
+            )
+            while True:
+                to_wa_raw = _ask("Your WhatsApp phone (E.164, e.g. +15125551234) - 'whatsapp:' prefix added automatically")
+                base = to_wa_raw.replace("whatsapp:", "").strip()
+                if _validate_e164(base):
+                    to_wa = f"whatsapp:{base}"
+                    break
+                _err("Must be E.164 format.")
+            values["TWILIO_FROM_WHATSAPP"] = from_wa
+            values["NOTIFY_TO_WHATSAPP"] = to_wa
+
+    # Meta WhatsApp Cloud API direct
+    if meta_needed:
+        channels.append("whatsapp_meta")
+        _info("\nMeta WhatsApp Cloud API direct (see README -> 'Meta WhatsApp Cloud API setup').")
+        _info("You'll need: Phone Number ID, long-lived Access Token, your own WhatsApp number.")
+        values["META_WA_PHONE_NUMBER_ID"] = _ask(
+            "META_WA_PHONE_NUMBER_ID (numeric, from Meta App Dashboard -> WhatsApp -> API Setup)"
+        )
+        values["META_WA_ACCESS_TOKEN"] = _ask(
+            "META_WA_ACCESS_TOKEN (long-lived System User token)", secret=True
         )
         while True:
-            to_wa_raw = _ask("Your WhatsApp phone (E.164, e.g. +15125551234) - 'whatsapp:' prefix added automatically")
-            base = to_wa_raw.replace("whatsapp:", "").strip()
-            if _validate_e164(base):
-                to_wa = f"whatsapp:{base}"
+            recipient_raw = _ask(
+                "Your WhatsApp number in E.164 (e.g. +15125551234) - we'll strip the '+'"
+            )
+            recipient_clean = recipient_raw.lstrip("+").strip()
+            if recipient_clean.isdigit() and 8 <= len(recipient_clean) <= 15:
+                values["META_WA_RECIPIENT"] = recipient_clean
                 break
-            _err("Must be E.164 format.")
-        values["TWILIO_FROM_WHATSAPP"] = from_wa
-        values["NOTIFY_TO_WHATSAPP"] = to_wa
+            _err("Must be digits only after '+', between 8 and 15 long.")
+        if _ask_yes_no(
+            "Configure a fallback Message Template now (lets notifications work outside the WhatsApp 24h window)?",
+            default=False,
+        ):
+            values["META_WA_TEMPLATE_NAME"] = _ask("META_WA_TEMPLATE_NAME (must be APPROVED in Meta)")
+            values["META_WA_TEMPLATE_LANGUAGE"] = _ask(
+                "META_WA_TEMPLATE_LANGUAGE",
+                default=values.get("META_WA_TEMPLATE_LANGUAGE", "en_US"),
+            )
+        else:
+            _warn("OK. Notifications will only be delivered within the 24h WhatsApp session window.")
+            _warn("If they stop arriving, message the bot once or set a template later.")
 
     if not channels:
         _warn("No notification channels selected; agent will still analyze + block calendar.")
