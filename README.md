@@ -1,7 +1,7 @@
 # Email Assistant
 
-An autonomous agent that monitors `rocky@blueprintconstructs.com` (or any
-Microsoft 365 mailbox), reads each new unread email with an LLM, and:
+An autonomous agent that monitors any Microsoft 365 mailbox, reads each new
+unread email with an LLM, and:
 
 - Detects whether it's a **meeting request** (extracting the proposed time).
 - For high-confidence meeting requests, **blocks your Outlook calendar**
@@ -89,7 +89,8 @@ You need **OpenAI** (for the LLM) and **one notification channel**. Pick one:
 ### One-time setup on the laptop
 
 ```powershell
-cd "C:\Users\rnuduru1\eMail assistant"
+# Replace this with the path where you cloned the repo
+cd "C:\path\to\eMailAssistant"
 
 # 1) Install Python (if needed), create venv, install deps
 .\bootstrap.ps1
@@ -272,7 +273,7 @@ All knobs live in `.env` (see `.env.example` for documented examples):
 | Key | Purpose |
 |-----|---------|
 | `MAILBOX_ADDRESS` | The mailbox being monitored. Used in prompts + filtering self from attendees. |
-| `USER_TIMEZONE` | IANA timezone (e.g. `America/Chicago`). Used for parsing relative times and creating calendar events. |
+| `USER_TIMEZONE` | IANA timezone (e.g. `America/New_York`, `Europe/London`, `Asia/Singapore`). Used for parsing relative times and creating calendar events. The setup wizard auto-detects this from your machine. |
 | `DEFAULT_MEETING_DURATION_MINUTES` | Used when an email proposes a start time but no end. |
 | `MS_CLIENT_ID`, `MS_TENANT_ID` | App-registration identifiers. |
 | `OPENAI_MODEL` | Defaults to `gpt-4o-mini` (cheap + plenty smart for triage). Swap for `gpt-4.1` or similar. |

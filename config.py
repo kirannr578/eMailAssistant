@@ -97,7 +97,7 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         mailbox_address=_get("MAILBOX_ADDRESS", required=True),
-        user_timezone=_get("USER_TIMEZONE", "America/Chicago"),
+        user_timezone=_get("USER_TIMEZONE", required=True),
         default_meeting_duration_minutes=_get_int("DEFAULT_MEETING_DURATION_MINUTES", 30),
         ms_client_id=_get("MS_CLIENT_ID", required=True),
         ms_tenant_id=_get("MS_TENANT_ID", "common"),

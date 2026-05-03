@@ -12,6 +12,24 @@ import re
 import sys
 from pathlib import Path
 
+
+def _detect_local_timezone() -> str:
+    """Best-effort IANA timezone detection. Falls back to UTC if unknown."""
+    try:
+        from tzlocal import get_localzone_name  # type: ignore
+        return get_localzone_name()
+    except Exception:
+        try:
+            from datetime import datetime
+            tz = datetime.now().astimezone().tzinfo
+            if tz is not None:
+                name = str(tz)
+                if "/" in name:
+                    return name
+        except Exception:
+            pass
+        return "UTC"
+
 ENV_TEMPLATE_PATH = Path(".env.example")
 ENV_PATH = Path(".env")
 
@@ -167,12 +185,15 @@ def run_wizard() -> int:
 
     # ---------- Mailbox ----------
     _h2("1/5  Mailbox")
+    mailbox_default = values.get("MAILBOX_ADDRESS") or None
     values["MAILBOX_ADDRESS"] = _ask(
-        "Mailbox to monitor (full email)", default=values.get("MAILBOX_ADDRESS")
+        "Mailbox to monitor (full email)", default=mailbox_default
     )
+    detected_tz = _detect_local_timezone()
+    tz_default = values.get("USER_TIMEZONE") or detected_tz
     values["USER_TIMEZONE"] = _ask(
-        "Your IANA timezone (e.g. America/Chicago, America/New_York)",
-        default=values.get("USER_TIMEZONE", "America/Chicago"),
+        "Your IANA timezone (e.g. America/New_York, Europe/London, Asia/Singapore)",
+        default=tz_default,
     )
 
     # ---------- Microsoft Graph ----------
