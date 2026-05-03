@@ -248,7 +248,13 @@ def main() -> int:
                         help="Process current unread mail and exit (for Task Scheduler).")
     parser.add_argument("--auth", action="store_true",
                         help="Run device-code OAuth flow to seed the token cache, then exit.")
+    parser.add_argument("--setup", action="store_true",
+                        help="Run the interactive .env setup wizard and exit.")
     args = parser.parse_args()
+
+    if args.setup:
+        from setup_wizard import run_wizard
+        return run_wizard()
 
     settings = load_settings()
     _setup_logging(settings.debug)

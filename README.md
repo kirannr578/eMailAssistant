@@ -39,92 +39,95 @@ State (SQLite): processed message IDs, calendar event IDs, notify status.
 Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 ```
 
+### Files
+
+```
+.
+├── bootstrap.ps1           # Installs Python, creates venv, pip installs
+├── main.py                 # Entry point: --setup | --auth | --once | (default loop)
+├── setup_wizard.py         # Interactive .env builder with live credential validation
+├── config.py               # Typed Settings loaded from .env
+├── analyzer.py             # OpenAI JSON-mode analysis + Pydantic schema
+├── state.py                # SQLite dedup of processed messages
+├── providers/
+│   ├── ms_graph_auth.py    # MSAL device-code OAuth + token cache
+│   ├── outlook.py          # Graph: list unread, mark read
+│   ├── calendar.py         # Graph: create event
+│   └── notifier.py         # Twilio SMS + WhatsApp (fail-soft per channel)
+├── scripts/
+│   ├── setup_entra.ps1     # Auto-create Entra app via Azure CLI
+│   └── install_task.ps1    # Register / uninstall the Windows Scheduled Task
+├── tests/test_analyzer.py
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
 ## Quick start (Windows / PowerShell)
 
-### 1. Prerequisites
+The whole thing is **5 commands + paste 4 secrets**. Helper scripts handle
+Python install, venv, dependencies, Entra app registration, and Task Scheduler
+registration. The only things you must do yourself are sign up for OpenAI and
+Twilio (their security models prevent automation).
 
-- Python 3.11+
-- A Microsoft Entra **app registration** (free)
-- An OpenAI API key
-- A Twilio account (trial works) for SMS / WhatsApp
+### Prerequisites you set up in a browser (~10 min)
 
-### 2. Microsoft Entra app registration (one-time)
+1. **OpenAI:** create a key at <https://platform.openai.com/api-keys> and add
+   ~$5 of credit at the billing page. `gpt-4o-mini` costs ~$0.0001 per email.
+2. **Twilio:** sign up at <https://www.twilio.com/try-twilio> (trial gives ~$15
+   credit). Buy an SMS-capable number; for WhatsApp opt your phone into the
+   free sandbox via Console -> Messaging -> Try it out.
 
-1. Go to <https://entra.microsoft.com> -> **App registrations** -> **New registration**.
-2. Name: `Email Assistant`.
-3. **Supported account types:** "Accounts in any organizational directory and
-   personal Microsoft accounts" (or whatever matches `blueprintconstructs.com`).
-4. Skip the Redirect URI. Click **Register**.
-5. On the new app: **Authentication** -> **Advanced settings** ->
-   "Allow public client flows" = **Yes**. Save.
-6. **API permissions** -> **Add a permission** -> Microsoft Graph -> **Delegated** ->
-   add: `Mail.ReadWrite`, `Calendars.ReadWrite`, `User.Read`, `offline_access`.
-   Click **Grant admin consent** (or your tenant admin does).
-7. Copy the **Application (client) ID** -> goes into `.env` as `MS_CLIENT_ID`.
-8. For `MS_TENANT_ID`, use:
-   - your tenant GUID for a single org,
-   - `common` for personal + work accounts,
-   - `consumers` for personal Microsoft accounts only.
-
-### 3. Install and configure
+### One-time setup on the laptop
 
 ```powershell
 cd "C:\Users\rnuduru1\eMail assistant"
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
 
-Copy-Item .env.example .env
-notepad .env   # fill in real values
-```
+# 1) Install Python (if needed), create venv, install deps
+.\bootstrap.ps1
 
-Required values in `.env`: `MS_CLIENT_ID`, `OPENAI_API_KEY`, plus Twilio
-credentials (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_*`,
-`NOTIFY_TO_*`). See `.env.example` for the full list with comments.
+# 2) Auto-create the Entra app registration (uses Azure CLI)
+#    Installs Azure CLI via winget if needed; opens browser once for `az login`.
+#    Prints MS_CLIENT_ID and MS_TENANT_ID at the end.
+.\scripts\setup_entra.ps1
 
-### 4. One-time sign-in (device-code flow)
+# 3) Interactive wizard - paste your OpenAI key, Twilio creds, and the IDs
+#    from step 2. The wizard validates each one with a live API call.
+python main.py --setup
 
-```powershell
+# 4) One-time Outlook sign-in (device-code flow opens a URL in your browser)
 python main.py --auth
-```
 
-The console prints something like:
-
-```
-To sign in, use a web browser to open the page https://microsoft.com/devicelogin
-and enter the code ABCD-EFGH to authenticate.
-```
-
-Open that URL on any device, sign in as `rocky@blueprintconstructs.com`, and
-approve the requested permissions. The refresh token is cached to
-`token_cache.bin` and reused silently afterwards.
-
-### 5. Run the agent
-
-Foreground polling loop (Ctrl+C to stop):
-
-```powershell
-python main.py
-```
-
-One-shot run (process current unread, then exit) - good for Task Scheduler:
-
-```powershell
+# 5) Smoke test
 python main.py --once
 ```
 
-### 6. Run unattended via Windows Task Scheduler
+If everything works, schedule it to run every 5 minutes:
 
-1. Open **Task Scheduler** -> **Create Task**.
-2. **General**: name "Email Assistant", "Run whether user is logged on or not",
-   check "Run with highest privileges".
-3. **Triggers**: New -> Daily, repeat task every 5 minutes for a duration of 1 day.
-4. **Actions**: New -> Start a program:
-   - Program/script: `C:\Users\rnuduru1\eMail assistant\.venv\Scripts\python.exe`
-   - Arguments: `main.py --once`
-   - Start in: `C:\Users\rnuduru1\eMail assistant`
-5. **Conditions**: uncheck "Start the task only if the computer is on AC power".
-6. Save (you'll be prompted for your Windows password).
+```powershell
+.\scripts\install_task.ps1                  # default: every 5 min
+.\scripts\install_task.ps1 -IntervalMinutes 10
+.\scripts\install_task.ps1 -Uninstall       # remove the task
+```
+
+To run interactively instead of via Task Scheduler:
+
+```powershell
+python main.py            # polling loop, Ctrl+C to stop
+```
+
+### What if you can't / don't want to use Azure CLI?
+
+The Entra app registration can be done manually in the portal in ~5 min:
+
+1. <https://entra.microsoft.com> -> **App registrations** -> **New registration**.
+2. Name `Email Assistant`. Supported account types: "Accounts in any
+   organizational directory and personal Microsoft accounts". Skip Redirect URI.
+3. **Authentication** -> Advanced -> "Allow public client flows" = Yes.
+4. **API permissions** -> Microsoft Graph -> Delegated:
+   `Mail.ReadWrite`, `Calendars.ReadWrite`, `User.Read`, `offline_access`.
+   Click "Grant admin consent" (admin only).
+5. Copy the Application (client) ID and your tenant ID. Use them in step 3 above.
 
 ## Configuration reference
 
