@@ -393,27 +393,66 @@ If the 7-day re-consent in Testing mode annoys you:
 ## Bid request handling
 
 Out of the box, the agent recognizes construction-style bid invitations and
-treats them as first-class events:
+extracts the full structure of an invitation-to-bid (ITB / RFP / RFQ).
 
-| Signal in email | Agent's response |
+### What gets extracted
+
+For every bid email, the agent's LLM pulls out:
+
+| Field | What it captures |
 |---|---|
-| "Invitation to Bid", "RFP", "RFQ", "ITB", "Please submit a bid for...", "Plans attached for bid", "Bid due [date]" | Marked as `is_bid_request=true` |
-| Project name, location, scope, due date, contact | Extracted into structured fields |
-| Bid due date in the future | Calendar event created `BID DUE: <project>` AT the due time (configurable via `AUTO_BLOCK_BID_REMINDER`) |
-| Notification | Starts with `[BID]` and includes project + due date |
+| **Project name** | Best-guess from subject + body. |
+| **Project location** | City, address, or region. |
+| **Project type / scope** | Trade or scope, e.g. "Mechanical TI", "Ground-up multifamily", "Site demo". |
+| **Bid scope summary** | One-sentence description of the work being bid. |
+| **Proposal due date** | When OUR bid must be submitted. If only a date is given, defaults to 17:00 local. |
+| **Submission method** | "email", "online portal", "in-person", "BuildingConnected", "Procore", etc. |
+| **RFI cutoff** | Last day to send questions to the GC, distinct from bid due. |
+| **Pre-bid meeting / walkthrough** | Date, time, and end (also called pre-bid conference, jobwalk, site visit). |
+| **Pre-bid mandatory flag** | True only when the email explicitly says "mandatory" / "required". |
+| **Pre-bid meeting location** | Physical address for in-person walkthroughs. |
+| **Pre-bid virtual link** | Teams / Zoom / Meet / Webex URL for virtual or hybrid meetings. |
+| **Bid contact** | Who to send the bid to (name and/or email). |
 
-The agent uses your `COMPANY_NAME` and `COMPANY_ALIASES` to recognize when a
-bid is specifically addressed to you (e.g. "BPC, please bid this project" gets
-much higher confidence than a generic mass invite).
+### What gets calendared
 
-Tweak the behavior:
+Calendar events are created automatically when `bid_confidence >= AUTO_BLOCK_CONFIDENCE`:
+
+| Calendar event | When it's created |
+|---|---|
+| `BID DUE: <project>` at the due time | `AUTO_BLOCK_BID_REMINDER=1` and the proposal due date is in the future. |
+| `PRE-BID MANDATORY WALKTHROUGH: <project>` | Email mentions a pre-bid meeting AND it's flagged mandatory. Confirmed (not tentative). |
+| `PRE-BID WALKTHROUGH: <project>` | Email mentions a non-mandatory walkthrough. Tentative. |
+
+The pre-bid event's location is set to the physical address when in-person, or
+to the virtual meeting link when virtual. If both are present (hybrid), the
+address goes in `location` and the link is included in the event body.
+
+### What goes in the notification
+
+The notification text is built by the LLM, then the agent appends action notes
+in pipe-separated form. Example for a bid email with a mandatory walkthrough,
+RFIs, and document capture:
+
+```
+[BID] Acme GC: Cedar Park OB - bid due Fri May 15 5pm | bid deadline blocked (Fri May 15 17:00) | MANDATORY pre-bid blocked (Tue May 12 10:00) | RFIs due Wed May 13 17:00 | 12 doc(s) saved -> https://onedrive...
+```
+
+### Targeting bids addressed to you
+
+The agent uses your `COMPANY_NAME` and `COMPANY_ALIASES` so the LLM
+distinguishes a bid invite specifically addressed to you ("BPC, please bid
+this project") from a generic blast to 100 subs. The targeted version gets a
+much higher `bid_confidence`, which is what gates auto-blocking the calendar.
+
+### Tweak the behavior
 
 | Env var | Effect |
 |---|---|
 | `COMPANY_NAME=Blueprint Constructs` | Full company name. Helps the LLM recognize "to/for/with us". |
 | `COMPANY_ALIASES=BPC,Blueprint` | Acronyms / nicknames. Comma-separated. |
-| `AUTO_BLOCK_BID_REMINDER=1` | `0` to disable auto-creating bid deadline reminders. |
-| `AUTO_BLOCK_CONFIDENCE=0.75` | Same threshold gates both meeting blocking and bid reminders. |
+| `AUTO_BLOCK_BID_REMINDER=1` | `0` to disable auto-creating bid deadline reminders (pre-bid walkthroughs are still blocked). |
+| `AUTO_BLOCK_CONFIDENCE=0.75` | Same threshold gates meeting blocking, bid reminders, pre-bid blocking, and document capture. |
 
 ## Bid document capture
 

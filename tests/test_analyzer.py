@@ -11,6 +11,7 @@ from analyzer import (
     _fallback_analysis,
     derive_bid_reminder_window,
     derive_meeting_window,
+    derive_pre_bid_window,
 )
 
 
@@ -169,3 +170,110 @@ def test_company_context_skips_alias_equal_to_name():
 def test_company_context_handles_empty():
     ctx = _company_context("", [])
     assert "user" in ctx.lower()
+
+
+# ----- pre-bid meeting + new schema fields -----
+
+def test_pre_bid_window_returns_default_duration():
+    far_future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    a = _base_bid(pre_bid_meeting_iso=far_future)
+    win = derive_pre_bid_window(a, default_duration_minutes=60)
+    assert win is not None
+    start, end = win
+    assert (end - start) == timedelta(minutes=60)
+
+
+def test_pre_bid_window_uses_explicit_end():
+    start_iso = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    end_iso = (datetime.now(timezone.utc) + timedelta(days=7, hours=2)).isoformat()
+    a = _base_bid(pre_bid_meeting_iso=start_iso, pre_bid_meeting_end_iso=end_iso)
+    win = derive_pre_bid_window(a)
+    assert win is not None
+    start, end = win
+    # Should be ~2 hours, not the default
+    assert (end - start) >= timedelta(minutes=110)
+    assert (end - start) <= timedelta(minutes=130)
+
+
+def test_pre_bid_window_none_when_in_past():
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    a = _base_bid(pre_bid_meeting_iso=past)
+    assert derive_pre_bid_window(a) is None
+
+
+def test_pre_bid_window_none_when_not_set():
+    a = _base_bid(pre_bid_meeting_iso=None)
+    assert derive_pre_bid_window(a) is None
+
+
+def test_pre_bid_window_fixes_inverted_end():
+    start_iso = (datetime.now(timezone.utc) + timedelta(days=7, hours=2)).isoformat()
+    end_iso = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # before start
+    a = _base_bid(pre_bid_meeting_iso=start_iso, pre_bid_meeting_end_iso=end_iso)
+    win = derive_pre_bid_window(a, default_duration_minutes=45)
+    assert win is not None
+    start, end = win
+    assert end > start
+    assert (end - start) == timedelta(minutes=45)
+
+
+def test_pre_bid_mandatory_flag_defaults_to_false():
+    a = _base_bid()
+    assert a.pre_bid_meeting_mandatory is False
+
+
+def test_pre_bid_mandatory_flag_can_be_set():
+    a = _base_bid(pre_bid_meeting_mandatory=True)
+    assert a.pre_bid_meeting_mandatory is True
+
+
+def test_rfi_due_iso_is_normalized():
+    rfi = "2030-06-01T17:00:00-05:00"
+    a = _base_bid(rfi_due_date_iso=rfi)
+    assert a.rfi_due_date_iso is not None
+    parsed = datetime.fromisoformat(a.rfi_due_date_iso)
+    assert parsed.tzinfo is not None
+
+
+def test_pre_bid_iso_is_normalized():
+    pb = "2030-05-15T10:00:00-05:00"
+    a = _base_bid(pre_bid_meeting_iso=pb)
+    assert a.pre_bid_meeting_iso is not None
+    parsed = datetime.fromisoformat(a.pre_bid_meeting_iso)
+    assert parsed.tzinfo is not None
+
+
+def test_pre_bid_location_and_link_can_coexist_for_hybrid():
+    a = _base_bid(
+        pre_bid_meeting_location="123 Main St, Cedar Park, TX",
+        pre_bid_meeting_link="https://teams.microsoft.com/l/meetup-join/abc",
+    )
+    assert a.pre_bid_meeting_location is not None
+    assert a.pre_bid_meeting_link is not None
+
+
+def test_new_optional_fields_default_to_none():
+    # Build a minimal Analysis (no bid, no meeting) and confirm new fields are None/False.
+    a = Analysis(
+        summary="x",
+        urgency="low",
+        suggested_action="x",
+        notification_text="x",
+    )
+    assert a.bid_project_type is None
+    assert a.bid_submission_method is None
+    assert a.rfi_due_date_iso is None
+    assert a.pre_bid_meeting_iso is None
+    assert a.pre_bid_meeting_end_iso is None
+    assert a.pre_bid_meeting_mandatory is False
+    assert a.pre_bid_meeting_location is None
+    assert a.pre_bid_meeting_link is None
+
+
+def test_fallback_analysis_includes_new_fields():
+    fb = _fallback_analysis("Subject", "x@example.com")
+    # New fields shouldn't break the fallback path.
+    assert fb.pre_bid_meeting_iso is None
+    assert fb.pre_bid_meeting_mandatory is False
+    assert fb.rfi_due_date_iso is None
+    assert fb.bid_submission_method is None

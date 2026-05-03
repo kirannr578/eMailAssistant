@@ -57,9 +57,24 @@ class Analysis(BaseModel):
     bid_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     bid_project_name: str | None = None
     bid_project_location: str | None = None
-    bid_due_date_iso: str | None = None       # when bid responses are due
-    bid_scope_summary: str | None = None      # brief description of work to bid on
-    bid_contact: str | None = None            # who to contact / submit to
+    bid_project_type: str | None = None       # e.g. "Mechanical TI", "Ground-up multifamily"
+
+    # Proposal / quote submission ("when does our bid have to be in?")
+    bid_due_date_iso: str | None = None
+    bid_submission_method: str | None = None  # "email", "portal", "in-person", etc.
+
+    # RFI cutoff ("last day to ask questions of the GC")
+    rfi_due_date_iso: str | None = None
+
+    # Pre-bid meeting / walkthrough / site visit
+    pre_bid_meeting_iso: str | None = None
+    pre_bid_meeting_end_iso: str | None = None
+    pre_bid_meeting_mandatory: bool = False
+    pre_bid_meeting_location: str | None = None   # physical address, if any
+    pre_bid_meeting_link: str | None = None       # virtual meeting URL, if any
+
+    bid_scope_summary: str | None = None
+    bid_contact: str | None = None
 
     # ----- shared -----
     summary: str
@@ -67,7 +82,14 @@ class Analysis(BaseModel):
     suggested_action: str
     notification_text: str
 
-    @field_validator("meeting_start_iso", "meeting_end_iso", "bid_due_date_iso")
+    @field_validator(
+        "meeting_start_iso",
+        "meeting_end_iso",
+        "bid_due_date_iso",
+        "rfi_due_date_iso",
+        "pre_bid_meeting_iso",
+        "pre_bid_meeting_end_iso",
+    )
     @classmethod
     def _validate_iso(cls, v: str | None) -> str | None:
         if v is None or v == "":
@@ -116,13 +138,48 @@ If is_bid_request=true:
 - Set bid_confidence (0..1).
 - Extract bid_project_name (best-guess, may be in subject or body).
 - Extract bid_project_location (city / address / region if mentioned).
-- Extract bid_due_date_iso (when bid responses must be submitted; absolute
-  ISO 8601 with offset). If only a date is given, use 17:00 in user's timezone.
+- Extract bid_project_type (trade or scope, e.g. "Mechanical TI",
+  "Ground-up multifamily", "Site demo", "Steel erection"). Null if unclear.
 - Extract bid_scope_summary (one sentence: what work is being bid).
-- Extract bid_contact (name and/or email of who to submit to).
+- Extract bid_contact (name and/or email of who to submit the bid to).
+
+PROPOSAL / BID SUBMISSION DETAILS
+- bid_due_date_iso = when OUR proposal/bid/quote must be submitted (absolute
+  ISO 8601 with offset). If only a date is given, use 17:00 in the user's
+  timezone. Look for phrases like "bid due", "proposals due", "responses due
+  by", "must be received by", "submit by".
+- bid_submission_method = how to submit. Common values: "email",
+  "online portal", "in-person", "fax", "BuildingConnected", "Procore",
+  "iSqFt", "uploaded to <link>". Null if not specified.
+
+RFI (Request For Information) CUTOFF
+- rfi_due_date_iso = last day to send questions to the GC / owner.
+  Look for "RFI deadline", "questions due by", "last day for questions",
+  "all RFIs must be submitted by". Distinct from the bid due date.
+  Null if not mentioned.
+
+PRE-BID MEETING / WALKTHROUGH / SITE VISIT
+Construction bids often include a pre-bid conference, jobwalk, walkthrough,
+or site visit. Look for phrases like: "pre-bid meeting", "pre-bid
+conference", "site walk", "jobwalk", "walkthrough", "site visit",
+"mandatory walkthrough", "non-mandatory pre-bid".
+- pre_bid_meeting_iso = start time (absolute ISO 8601 with offset).
+- pre_bid_meeting_end_iso = end time if given, else null.
+- pre_bid_meeting_mandatory = true ONLY if the email explicitly says
+  mandatory / required / must attend. "Recommended" / "encouraged" / silence
+  on the topic = false.
+- pre_bid_meeting_location = physical address of the meeting if it's
+  in-person. Null if it's virtual-only.
+- pre_bid_meeting_link = URL of the virtual meeting (Teams, Zoom, Meet,
+  Webex, etc.) if it's virtual or hybrid. Null if in-person-only.
+
+NOT bid requests: vendor sales pitches asking US to buy something, generic
+marketing, status updates on jobs already in progress, change orders on
+existing contracts.
 
 (3) URGENCY (always set)
-- high   = action needed within hours (bid due today/tomorrow, urgent meeting)
+- high   = action needed within hours (bid due today/tomorrow, mandatory
+  walkthrough today/tomorrow, urgent meeting)
 - medium = within a day or two
 - low    = informational, no rush
 
@@ -133,8 +190,9 @@ Start with the most important tag the email warrants:
 - "[MEETING]" if is_meeting_request only
 - "[URGENT]"  if neither but urgency is high
 - "[INFO]"    otherwise
-Include the sender's name/company, the project or subject, and the most
-important date (bid due date OR meeting time).
+For bid requests, include: sender/GC, project name, bid due date, and
+"PRE-BID MANDATORY <date/time>" or "PRE-BID <date/time>" when known.
+For meetings, include sender, subject, and the meeting time.
 
 Return STRICT JSON matching this schema. No markdown, no commentary.
 {{
@@ -148,11 +206,19 @@ Return STRICT JSON matching this schema. No markdown, no commentary.
 
   "is_bid_request": bool,
   "bid_confidence": float,
-  "bid_project_name":     string | null,
-  "bid_project_location": string | null,
-  "bid_due_date_iso":     string | null,
-  "bid_scope_summary":    string | null,
-  "bid_contact":          string | null,
+  "bid_project_name":         string | null,
+  "bid_project_location":     string | null,
+  "bid_project_type":         string | null,
+  "bid_due_date_iso":         string | null,
+  "bid_submission_method":    string | null,
+  "rfi_due_date_iso":         string | null,
+  "pre_bid_meeting_iso":      string | null,
+  "pre_bid_meeting_end_iso":  string | null,
+  "pre_bid_meeting_mandatory": bool,
+  "pre_bid_meeting_location": string | null,
+  "pre_bid_meeting_link":     string | null,
+  "bid_scope_summary":        string | null,
+  "bid_contact":              string | null,
 
   "summary": string,
   "urgency": "low" | "medium" | "high",
@@ -376,3 +442,27 @@ def derive_bid_reminder_window(
         return None
     end = due + timedelta(minutes=duration_minutes)
     return due, end
+
+
+def derive_pre_bid_window(
+    analysis: Analysis,
+    *,
+    default_duration_minutes: int = 60,
+) -> tuple[datetime, datetime] | None:
+    """Return (start, end) for the pre-bid walkthrough / conference.
+
+    Default duration is 60 min (typical for a site walk) when no end is given.
+    Returns None if no usable start or if the meeting is already in the past.
+    """
+    if not analysis.pre_bid_meeting_iso:
+        return None
+    start = date_parser.isoparse(analysis.pre_bid_meeting_iso)
+    if start <= datetime.now(start.tzinfo):
+        return None
+    if analysis.pre_bid_meeting_end_iso:
+        end = date_parser.isoparse(analysis.pre_bid_meeting_end_iso)
+    else:
+        end = start + timedelta(minutes=default_duration_minutes)
+    if end <= start:
+        end = start + timedelta(minutes=default_duration_minutes)
+    return start, end

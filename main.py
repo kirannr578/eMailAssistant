@@ -18,7 +18,13 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-from analyzer import Analysis, EmailAnalyzer, derive_bid_reminder_window, derive_meeting_window
+from analyzer import (
+    Analysis,
+    EmailAnalyzer,
+    derive_bid_reminder_window,
+    derive_meeting_window,
+    derive_pre_bid_window,
+)
 from config import Settings, load_settings
 from document_downloader import (
     download_document,
@@ -325,6 +331,70 @@ def _process_one(
             except Exception as e:
                 logger.exception("  -> bid reminder create_event failed: %s", e)
                 calendar_action_note += " | bid reminder FAILED"
+
+    # ---- Pre-bid meeting / walkthrough: block calendar at the meeting time ----
+    if (
+        analysis.is_bid_request
+        and analysis.bid_confidence >= settings.auto_block_confidence
+        and analysis.pre_bid_meeting_iso
+    ):
+        pb_window = derive_pre_bid_window(analysis)
+        if pb_window is None:
+            calendar_action_note += " (pre-bid meeting in past, not blocked)"
+        else:
+            pb_start, pb_end = pb_window
+            project = analysis.bid_project_name or msg.subject
+            mandatory_tag = "MANDATORY " if analysis.pre_bid_meeting_mandatory else ""
+            pb_subject = f"PRE-BID {mandatory_tag}WALKTHROUGH: {project}".strip()
+            # Calendar 'location' field: prefer physical address, fall back to virtual link.
+            pb_location = (
+                analysis.pre_bid_meeting_location
+                or analysis.pre_bid_meeting_link
+                or analysis.bid_project_location
+            )
+            virtual_line = (
+                f"Virtual link: {analysis.pre_bid_meeting_link}\n"
+                if analysis.pre_bid_meeting_link else ""
+            )
+            try:
+                pb_eid = calendar.create_event(
+                    subject=pb_subject,
+                    start=pb_start,
+                    end=pb_end,
+                    body_text=(
+                        f"Auto-created pre-bid meeting by Email Assistant.\n\n"
+                        f"From: {msg.sender}\n"
+                        f"Project: {project}\n"
+                        f"Project location: {analysis.bid_project_location or '(see email)'}\n"
+                        f"Meeting location: {analysis.pre_bid_meeting_location or '(see virtual link)'}\n"
+                        f"{virtual_line}"
+                        f"Mandatory: {'YES' if analysis.pre_bid_meeting_mandatory else 'no'}\n\n"
+                        f"Summary: {analysis.summary}\n\n"
+                        f"Original email: {msg.web_link or '(link unavailable)'}"
+                    ),
+                    location=pb_location,
+                    is_tentative=not analysis.pre_bid_meeting_mandatory,
+                )
+                calendar_event_ids.append(pb_eid)
+                tag = "MANDATORY pre-bid" if analysis.pre_bid_meeting_mandatory else "pre-bid"
+                calendar_action_note += f" | {tag} blocked ({pb_start:%a %b %d %H:%M})"
+                logger.info("  -> pre-bid event %s created", pb_eid)
+            except Exception as e:
+                logger.exception("  -> pre-bid create_event failed: %s", e)
+                calendar_action_note += " | pre-bid block FAILED"
+
+    # ---- RFI cutoff: optionally surface in the action note (no calendar event by default) ----
+    if (
+        analysis.is_bid_request
+        and analysis.bid_confidence >= settings.auto_block_confidence
+        and analysis.rfi_due_date_iso
+    ):
+        try:
+            from dateutil import parser as _dp
+            _rfi = _dp.isoparse(analysis.rfi_due_date_iso)
+            calendar_action_note += f" | RFIs due {_rfi:%a %b %d %H:%M}"
+        except Exception:
+            pass
 
     calendar_event_id = calendar_event_ids[0] if calendar_event_ids else None
 
