@@ -204,7 +204,7 @@ def run_wizard() -> int:
     values = _load_template()
 
     # ---------- Mailbox + company ----------
-    _h2("1/5  Mailbox + your company")
+    _h2("1/6  Mailbox + your company")
     mailbox_default = values.get("MAILBOX_ADDRESS") or None
     values["MAILBOX_ADDRESS"] = _ask(
         "Mailbox to monitor (full email)", default=mailbox_default
@@ -227,7 +227,7 @@ def run_wizard() -> int:
     )
 
     # ---------- Email + Calendar provider ----------
-    _h2("2/5  Email + Calendar provider")
+    _h2("2/6  Email + Calendar provider")
     print()
     print("    [1] Microsoft 365 / Outlook  (Outlook + Outlook Calendar via Graph)")
     print("    [2] Google / Gmail           (Gmail + Google Calendar)")
@@ -262,7 +262,7 @@ def run_wizard() -> int:
         )
 
     # ---------- LLM (pluggable) ----------
-    _h2("3/5  LLM provider (the brain that analyzes emails)")
+    _h2("3/6  LLM provider (the brain that analyzes emails)")
     print()
     print("    [1] OpenAI            (paid, ~$0.0001/email; needs https://platform.openai.com key)")
     print("    [2] GitHub Models     (FREE; needs a GitHub PAT at https://github.com/settings/tokens)")
@@ -329,7 +329,7 @@ def run_wizard() -> int:
     values["AZURE_OPENAI_API_VERSION"] = azure_version
 
     # ---------- Notification channels ----------
-    _h2("4/5  Notification channels")
+    _h2("4/6  Notification channels")
     _info("Pick how you want to be notified. You can enable more than one.")
     print()
     print("    [1] Telegram bot                         (FREE, easiest, recommended)")
@@ -457,14 +457,43 @@ def run_wizard() -> int:
         _warn("No notification channels selected; agent will still analyze + block calendar.")
     values["NOTIFY_CHANNELS"] = ",".join(channels)
 
+    # ---------- Bid document capture ----------
+    _h2("5/6  Bid document capture (auto-download to OneDrive / Google Drive)")
+    cloud_label = "OneDrive" if provider == "outlook" else "Google Drive"
+    _info(f"\nWhen the agent flags a bid email, it can copy attachments + document")
+    _info(f"links straight into {cloud_label} so they're ready to estimate.")
+    _info("Authenticated portals (Procore, BuildingConnected, iSqFt, etc.) are")
+    _info("auto-detected and skipped - those require login to download.\n")
+    if _ask_yes_no(f"Enable bid document capture to {cloud_label}?", default=True):
+        values["AUTO_DOWNLOAD_BID_DOCS"] = "1"
+        values["BID_DOCS_BASE_FOLDER"] = _ask(
+            f"Base folder in {cloud_label} (per-project subfolders are auto-created)",
+            default=values.get("BID_DOCS_BASE_FOLDER", "Email Assistant/Bids"),
+        )
+        if _ask_yes_no(
+            "Also download document URLs found in the email body? "
+            "(useful for SharePoint / Dropbox / WeTransfer links)",
+            default=True,
+        ):
+            values["DOWNLOAD_DOCS_FROM_LINKS"] = "1"
+        else:
+            values["DOWNLOAD_DOCS_FROM_LINKS"] = "0"
+        values["MAX_DOWNLOAD_MB"] = _ask(
+            "Max per-file size to download (MB). Larger files are skipped + logged.",
+            default=values.get("MAX_DOWNLOAD_MB", "200"),
+        )
+    else:
+        values["AUTO_DOWNLOAD_BID_DOCS"] = "0"
+        _warn("Document capture disabled. Re-enable later by setting AUTO_DOWNLOAD_BID_DOCS=1 in .env.")
+
     # ---------- Agent behavior ----------
-    _h2("5/5  Agent behavior (defaults are sensible)")
+    _h2("6/6  Agent behavior (defaults are sensible)")
     values["POLL_INTERVAL_SECONDS"] = _ask(
         "Polling interval in seconds",
         default=values.get("POLL_INTERVAL_SECONDS", "60"),
     )
     values["AUTO_BLOCK_CONFIDENCE"] = _ask(
-        "Confidence threshold to auto-block calendar (0.0-1.0)",
+        "Confidence threshold to auto-block calendar / save bid docs (0.0-1.0)",
         default=values.get("AUTO_BLOCK_CONFIDENCE", "0.75"),
     )
     values["DEFAULT_MEETING_DURATION_MINUTES"] = _ask(
@@ -475,7 +504,10 @@ def run_wizard() -> int:
     _write_env(values)
     _h1(f"Wrote {ENV_PATH.resolve()}")
     _info("Next steps:")
-    _info("  1) python main.py --auth     (one-time Outlook sign-in via device code)")
+    auth_provider = "Outlook" if provider == "outlook" else "Google"
+    file_scope = "Files.ReadWrite (OneDrive)" if provider == "outlook" else "drive.file (Drive)"
+    _info(f"  1) python main.py --auth     ({auth_provider} sign-in - includes {file_scope} consent)")
     _info("  2) python main.py --once     (process current unread + exit; great smoke test)")
     _info("  3) python main.py            (run the polling loop)")
+    _info("  4) .\\scripts\\install_task.ps1   (optional: register a Windows Scheduled Task)")
     return 0

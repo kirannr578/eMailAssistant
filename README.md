@@ -82,10 +82,12 @@ Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 
 ## Quick start (Windows / PowerShell)
 
-The whole thing is **5 commands + paste 4 secrets**. Helper scripts handle
-Python install, venv, dependencies, Entra app registration, and Task Scheduler
-registration. The only things you must do yourself are sign up for OpenAI and
-Twilio (their security models prevent automation).
+The whole thing is **5 commands + paste a handful of secrets**. Helper scripts
+handle Python install, venv, dependencies, Entra app registration (incl. the
+OneDrive `Files.ReadWrite` scope for bid document capture), and Task Scheduler
+registration. The only things you must do yourself are sign up for your chosen
+LLM provider and notification channel - their security models prevent
+automation.
 
 ### Prerequisites you set up in a browser
 
@@ -124,20 +126,31 @@ cd "C:\path\to\eMailAssistant"
 # 1) Install Python (if needed), create venv, install deps
 .\bootstrap.ps1
 
-# 2) Auto-create the Entra app registration (uses Azure CLI)
+# 2) (Outlook users) Auto-create the Entra app registration via Azure CLI.
 #    Installs Azure CLI via winget if needed; opens browser once for `az login`.
-#    Prints MS_CLIENT_ID and MS_TENANT_ID at the end.
+#    Registers Mail.ReadWrite + Calendars.ReadWrite + Files.ReadWrite (OneDrive)
+#    and prints MS_CLIENT_ID + MS_TENANT_ID at the end.
 .\scripts\setup_entra.ps1
 
-# 3) Interactive wizard - paste your OpenAI key, Twilio creds, and the IDs
-#    from step 2. The wizard validates each one with a live API call.
+# 3) Interactive wizard - 6 sections covering mailbox + company, email/LLM
+#    provider, notification channels, and bid document capture (OneDrive /
+#    Google Drive). Validates each credential with a live API call.
 python main.py --setup
 
-# 4) One-time Outlook sign-in (device-code flow opens a URL in your browser)
+# 4) One-time email-provider sign-in (device-code flow for Outlook,
+#    browser flow for Gmail). Grants the agent access to mailbox, calendar,
+#    AND OneDrive/Google Drive in a single consent.
 python main.py --auth
 
 # 5) Smoke test
 python main.py --once
+```
+
+Already had the agent installed before bid-doc-capture shipped? You only
+need to re-run step 4 to consent to the new file-storage scope:
+
+```powershell
+python main.py --auth        # picks up Files.ReadWrite (Outlook) or drive.file (Gmail)
 ```
 
 If everything works, schedule it to run every 5 minutes:
@@ -163,7 +176,8 @@ The Entra app registration can be done manually in the portal in ~5 min:
    organizational directory and personal Microsoft accounts". Skip Redirect URI.
 3. **Authentication** -> Advanced -> "Allow public client flows" = Yes.
 4. **API permissions** -> Microsoft Graph -> Delegated:
-   `Mail.ReadWrite`, `Calendars.ReadWrite`, `User.Read`, `offline_access`.
+   `Mail.ReadWrite`, `Calendars.ReadWrite`, `Files.ReadWrite`, `User.Read`,
+   `offline_access`.
    Click "Grant admin consent" (admin only).
 5. Copy the Application (client) ID and your tenant ID. Use them in step 3 above.
 

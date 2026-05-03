@@ -98,17 +98,26 @@ Write-Host ""
 Write-Host "  1. Activate the venv (only needed for new shells):" -ForegroundColor White
 Write-Host "       .\.venv\Scripts\Activate.ps1" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  2. Auto-create the Microsoft Entra app registration:" -ForegroundColor White
+Write-Host "  2. (Outlook users only) Auto-create the Microsoft Entra app registration:" -ForegroundColor White
 Write-Host "       .\scripts\setup_entra.ps1" -ForegroundColor Yellow
-Write-Host "     (or do it manually via the README - takes 5 min)" -ForegroundColor DarkGray
+Write-Host "     Registers Mail.ReadWrite + Calendars.ReadWrite + Files.ReadWrite (OneDrive)." -ForegroundColor DarkGray
+Write-Host "     (Gmail users: download an OAuth client_secret.json from Google Cloud Console" -ForegroundColor DarkGray
+Write-Host "      - see README section 'Gmail / Google Workspace setup'.)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  3. Run the interactive setup wizard to fill in .env:" -ForegroundColor White
 Write-Host "       python main.py --setup" -ForegroundColor Yellow
+Write-Host "     Walks you through mailbox, company, email/LLM provider, notification" -ForegroundColor DarkGray
+Write-Host "     channels, and bid document capture (OneDrive / Google Drive)." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  4. One-time Outlook sign-in (device code):" -ForegroundColor White
+Write-Host "  4. One-time email-provider sign-in (device code or browser):" -ForegroundColor White
 Write-Host "       python main.py --auth" -ForegroundColor Yellow
+Write-Host "     Grants the agent access to your mailbox, calendar, AND OneDrive/Drive" -ForegroundColor DarkGray
+Write-Host "     for bid document capture." -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  5. Smoke test, then run for real:" -ForegroundColor White
 Write-Host "       python main.py --once" -ForegroundColor Yellow
 Write-Host "       python main.py" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  6. (Optional) Register a Windows Scheduled Task to run unattended:" -ForegroundColor White
+Write-Host "       .\scripts\install_task.ps1" -ForegroundColor Yellow
 Write-Host ""
