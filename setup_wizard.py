@@ -103,20 +103,40 @@ def _validate_e164(num: str) -> bool:
     return bool(_E164.match(num))
 
 
-def _validate_openai(api_key: str, model: str) -> bool:
+def _validate_llm(provider: str, api_key: str, model: str, base_url: str = "",
+                  azure_endpoint: str = "", azure_api_version: str = "") -> bool:
+    """Live-test the LLM credentials by making a tiny chat completion call."""
     try:
-        from openai import OpenAI
+        from openai import AzureOpenAI, OpenAI
     except ImportError:
         _warn("openai package not installed yet; skipping live validation.")
         return True
     try:
-        client = OpenAI(api_key=api_key)
-        # Cheapest possible call: list a single model.
-        client.models.list()
-        _ok(f"OpenAI key works. Will use model: {model}")
+        if provider == "azure_openai":
+            client = AzureOpenAI(
+                api_key=api_key,
+                api_version=azure_api_version or "2024-08-01-preview",
+                azure_endpoint=azure_endpoint,
+            )
+        else:
+            defaults = {
+                "github_models": "https://models.github.ai/inference",
+                "ollama": "http://localhost:11434/v1",
+            }
+            url = base_url or defaults.get(provider) or None
+            key = api_key or ("ollama" if provider == "ollama" else "")
+            client = OpenAI(api_key=key, base_url=url)
+
+        client.chat.completions.create(
+            model=model,
+            temperature=0,
+            max_tokens=4,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        _ok(f"LLM ({provider}) works with model: {model}")
         return True
     except Exception as e:
-        _err(f"OpenAI validation failed: {e}")
+        _err(f"LLM validation failed: {e}")
         return False
 
 
@@ -196,43 +216,154 @@ def run_wizard() -> int:
         default=tz_default,
     )
 
-    # ---------- Microsoft Graph ----------
-    _h2("2/5  Microsoft Graph (Outlook + Calendar)")
-    _info("If you ran scripts\\setup_entra.ps1, the values are printed at the end of that script.")
-    _info("Otherwise see README section 'Microsoft Entra app registration'.")
-    values["MS_CLIENT_ID"] = _ask("MS_CLIENT_ID (Application (client) ID)")
-    values["MS_TENANT_ID"] = _ask(
-        "MS_TENANT_ID (tenant GUID, or 'common' for personal+work, 'consumers' for personal)",
-        default=values.get("MS_TENANT_ID", "common"),
-    )
+    # ---------- Email + Calendar provider ----------
+    _h2("2/5  Email + Calendar provider")
+    print()
+    print("    [1] Microsoft 365 / Outlook  (Outlook + Outlook Calendar via Graph)")
+    print("    [2] Google / Gmail           (Gmail + Google Calendar)")
+    print()
+    pick = _ask("Pick a provider", default="1").strip()
+    provider = "gmail" if pick == "2" else "outlook"
+    values["EMAIL_PROVIDER"] = provider
 
-    # ---------- OpenAI ----------
-    _h2("3/5  OpenAI (LLM analysis)")
-    _info("Get a key at https://platform.openai.com/api-keys (need a small billing balance).")
+    if provider == "outlook":
+        _info("If you ran scripts\\setup_entra.ps1, the values are printed at the end of that script.")
+        _info("Otherwise see README section 'Microsoft Entra app registration'.")
+        values["MS_CLIENT_ID"] = _ask("MS_CLIENT_ID (Application (client) ID)")
+        values["MS_TENANT_ID"] = _ask(
+            "MS_TENANT_ID (tenant GUID, or 'common' for personal+work, 'consumers' for personal)",
+            default=values.get("MS_TENANT_ID", "common"),
+        )
+    else:
+        _info("See README section 'Gmail / Google Workspace setup' for the Google Cloud Console steps.")
+        _info("You should have downloaded an OAuth client JSON named something like client_secret_XXX.json.")
+        while True:
+            path = _ask(
+                "GOOGLE_CLIENT_SECRETS_PATH (path to the OAuth client JSON)",
+                default=values.get("GOOGLE_CLIENT_SECRETS_PATH", "client_secret.json"),
+            )
+            if Path(path).exists():
+                values["GOOGLE_CLIENT_SECRETS_PATH"] = path
+                break
+            _err(f"File not found: {path}")
+        values["GOOGLE_CALENDAR_ID"] = _ask(
+            "GOOGLE_CALENDAR_ID ('primary' = your main calendar)",
+            default=values.get("GOOGLE_CALENDAR_ID", "primary"),
+        )
+
+    # ---------- LLM (pluggable) ----------
+    _h2("3/5  LLM provider (the brain that analyzes emails)")
+    print()
+    print("    [1] OpenAI            (paid, ~$0.0001/email; needs https://platform.openai.com key)")
+    print("    [2] GitHub Models     (FREE; needs a GitHub PAT at https://github.com/settings/tokens)")
+    print("    [3] Ollama (local)    (FREE; needs `ollama serve` running locally)")
+    print("    [4] Azure OpenAI      (work account; needs your Azure deployment URL)")
+    print("    [5] OpenAI-compatible (LM Studio, vLLM, etc.; you provide base_url)")
+    print()
+    pick = _ask("Pick a provider", default="1").strip()
+    provider_map = {
+        "1": "openai", "2": "github_models", "3": "ollama",
+        "4": "azure_openai", "5": "openai_compat",
+    }
+    provider = provider_map.get(pick, "openai")
+    values["LLM_PROVIDER"] = provider
+
+    default_models = {
+        "openai": "gpt-4o-mini", "github_models": "openai/gpt-4o-mini",
+        "ollama": "llama3.1:8b", "azure_openai": "gpt-4o-mini",
+        "openai_compat": "gpt-4o-mini",
+    }
+
     while True:
-        openai_key = _ask("OPENAI_API_KEY (starts with sk-)", secret=True)
-        model = _ask("OPENAI_MODEL", default=values.get("OPENAI_MODEL", "gpt-4o-mini"))
-        if _validate_openai(openai_key, model):
+        if provider == "ollama":
+            api_key = ""
+            base_url = _ask("LLM_BASE_URL", default="http://localhost:11434/v1")
+            azure_endpoint = ""
+            azure_version = ""
+        elif provider == "azure_openai":
+            api_key = _ask("Azure OpenAI API key", secret=True)
+            azure_endpoint = _ask("AZURE_OPENAI_ENDPOINT (e.g. https://your-resource.openai.azure.com)")
+            azure_version = _ask("AZURE_OPENAI_API_VERSION", default="2024-08-01-preview")
+            base_url = ""
+        elif provider == "openai_compat":
+            api_key = _ask("API key for your OpenAI-compatible endpoint", secret=True)
+            base_url = _ask("LLM_BASE_URL (e.g. http://localhost:1234/v1)")
+            azure_endpoint = ""
+            azure_version = ""
+        elif provider == "github_models":
+            _info("Create a fine-grained PAT at https://github.com/settings/tokens (no scopes needed for Models).")
+            api_key = _ask("GitHub PAT (ghp_... or github_pat_...)", secret=True)
+            base_url = ""
+            azure_endpoint = ""
+            azure_version = ""
+        else:  # openai
+            api_key = _ask("OpenAI API key (sk-...)", secret=True)
+            base_url = ""
+            azure_endpoint = ""
+            azure_version = ""
+
+        model = _ask(
+            "Model name (for Azure: deployment name)",
+            default=default_models.get(provider, "gpt-4o-mini"),
+        )
+
+        if _validate_llm(provider, api_key, model, base_url, azure_endpoint, azure_version):
             break
-        if not _ask_yes_no("Re-enter OpenAI credentials?", default=True):
+        if not _ask_yes_no("Re-enter LLM credentials?", default=True):
             break
-    values["OPENAI_API_KEY"] = openai_key
-    values["OPENAI_MODEL"] = model
+
+    values["LLM_API_KEY"] = api_key
+    values["LLM_MODEL"] = model
+    values["LLM_BASE_URL"] = base_url
+    values["AZURE_OPENAI_ENDPOINT"] = azure_endpoint
+    values["AZURE_OPENAI_API_VERSION"] = azure_version
 
     # ---------- Notification channels ----------
     _h2("4/5  Notification channels")
     _info("Pick how you want to be notified. You can enable more than one.")
     print()
-    print("    [1] WhatsApp via Meta Cloud API direct  (free up to 1000/mo)")
-    print("    [2] WhatsApp via Twilio                 (sandbox is free)")
-    print("    [3] SMS via Twilio                      (real SMS, paid)")
+    print("    [1] Telegram bot                         (FREE, easiest, recommended)")
+    print("    [2] WhatsApp via Meta Cloud API direct   (free up to 1000/mo, 30-min setup)")
+    print("    [3] WhatsApp via Twilio                  (sandbox is free)")
+    print("    [4] SMS via Twilio                       (real SMS, paid)")
     print()
-    pick = _ask("Pick one or more (e.g. '1' or '1,3')", default="1").strip()
+    pick = _ask("Pick one or more (e.g. '1' or '1,2')", default="1").strip()
     chosen = {p.strip() for p in pick.split(",") if p.strip()}
 
     channels: list[str] = []
-    twilio_needed = bool(chosen & {"2", "3"})
-    meta_needed = "1" in chosen
+    telegram_needed = "1" in chosen
+    meta_needed = "2" in chosen
+    twilio_needed = bool(chosen & {"3", "4"})
+
+    # Telegram first - simplest
+    if telegram_needed:
+        channels.append("telegram")
+        _info("\nTelegram setup: in Telegram, message @BotFather, send /newbot, follow prompts.")
+        _info("BotFather will give you a token like 7891234567:AAH...xyz")
+        bot_token = _ask("TELEGRAM_BOT_TOKEN", secret=True)
+        values["TELEGRAM_BOT_TOKEN"] = bot_token
+
+        chat_id = ""
+        if _ask_yes_no(
+            "Auto-discover your chat ID? (recommended) - I'll wait while you message your bot.",
+            default=True,
+        ):
+            _info("\n>>> Now open Telegram, find your new bot, tap Start, and send any message (e.g. 'hi') <<<")
+            try:
+                from providers.telegram import discover_chat_id
+                chat_id = discover_chat_id(bot_token, poll_seconds=120) or ""
+            except Exception as e:
+                _warn(f"Auto-discovery error: {e}")
+            if chat_id:
+                _ok(f"Found chat ID: {chat_id}")
+            else:
+                _warn("Could not auto-discover chat ID within 2 minutes.")
+
+        if not chat_id:
+            _info("Find your chat ID manually: open https://api.telegram.org/bot<TOKEN>/getUpdates")
+            _info("Look for 'chat':{'id': <number>, 'type':'private'}")
+            chat_id = _ask("TELEGRAM_CHAT_ID")
+        values["TELEGRAM_CHAT_ID"] = chat_id
 
     # Twilio (only if user picked SMS or Twilio WhatsApp)
     if twilio_needed:

@@ -20,10 +20,8 @@ from datetime import datetime, timedelta, timezone
 
 from analyzer import Analysis, EmailAnalyzer, derive_meeting_window
 from config import Settings, load_settings
-from providers.calendar import CalendarClient
-from providers.ms_graph_auth import GraphAuth
+from providers.base import CalendarProvider, EmailMessage, EmailProvider
 from providers.notifier import Notifier, NotifierConfig
-from providers.outlook import EmailMessage, OutlookClient
 from state import StateStore
 
 logger = logging.getLogger("email_assistant")
@@ -40,18 +38,51 @@ def _setup_logging(debug: bool) -> None:
     logging.getLogger("msal").setLevel(logging.WARNING)
 
 
+def _build_email_and_calendar(settings: Settings) -> tuple[EmailProvider, CalendarProvider]:
+    """Construct provider clients based on EMAIL_PROVIDER."""
+    if settings.email_provider == "outlook":
+        from providers.calendar import CalendarClient
+        from providers.ms_graph_auth import GraphAuth
+        from providers.outlook import OutlookClient
+
+        auth = GraphAuth(
+            client_id=settings.ms_client_id,
+            tenant_id=settings.ms_tenant_id,
+            token_cache_path=settings.ms_token_cache_path,
+        )
+        return OutlookClient(auth), CalendarClient(auth, user_timezone=settings.user_timezone)
+
+    if settings.email_provider == "gmail":
+        from providers.gmail import GmailClient
+        from providers.google_auth import GoogleAuth
+        from providers.google_calendar import GoogleCalendarClient
+
+        gauth = GoogleAuth(
+            client_secrets_path=settings.google_client_secrets_path,
+            token_cache_path=settings.google_token_cache_path,
+        )
+        return (
+            GmailClient(gauth),
+            GoogleCalendarClient(
+                gauth,
+                user_timezone=settings.user_timezone,
+                calendar_id=settings.google_calendar_id,
+            ),
+        )
+
+    raise RuntimeError(f"Unknown EMAIL_PROVIDER: {settings.email_provider}")
+
+
 def _build_components(settings: Settings):
-    auth = GraphAuth(
-        client_id=settings.ms_client_id,
-        tenant_id=settings.ms_tenant_id,
-        token_cache_path=settings.ms_token_cache_path,
-    )
-    outlook = OutlookClient(auth)
-    calendar = CalendarClient(auth, user_timezone=settings.user_timezone)
+    email_client, calendar = _build_email_and_calendar(settings)
     analyzer = EmailAnalyzer(
-        api_key=settings.openai_api_key,
-        model=settings.openai_model,
+        provider=settings.llm_provider,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
         user_timezone=settings.user_timezone,
+        base_url=settings.llm_base_url,
+        azure_endpoint=settings.azure_openai_endpoint,
+        azure_api_version=settings.azure_openai_api_version,
     )
     notifier = Notifier(
         NotifierConfig(
@@ -67,11 +98,13 @@ def _build_components(settings: Settings):
             meta_template_name=settings.meta_wa_template_name,
             meta_template_language=settings.meta_wa_template_language,
             meta_api_version=settings.meta_wa_api_version,
+            telegram_bot_token=settings.telegram_bot_token,
+            telegram_chat_id=settings.telegram_chat_id,
             channels=settings.notify_channels,
         )
     )
     state = StateStore(settings.state_db_path)
-    return auth, outlook, calendar, analyzer, notifier, state
+    return email_client, calendar, analyzer, notifier, state
 
 
 def _process_one(
@@ -79,9 +112,9 @@ def _process_one(
     *,
     settings: Settings,
     analyzer: EmailAnalyzer,
-    calendar: CalendarClient,
+    calendar: CalendarProvider,
     notifier: Notifier,
-    outlook: OutlookClient,
+    email_client: EmailProvider,
     state: StateStore,
 ) -> None:
     logger.info("Analyzing message %s | from=%s | subject=%r",
@@ -147,7 +180,7 @@ def _process_one(
         logger.info("  -> notification skipped (no channels configured / all failed)")
 
     try:
-        outlook.mark_read(msg.id)
+        email_client.mark_read(msg.id)
     except Exception as e:
         logger.warning("  -> mark_read failed (will dedupe via local state): %s", e)
 
@@ -162,12 +195,12 @@ def _process_one(
 
 def run_once(settings: Settings) -> int:
     """Process all currently-unread messages once. Returns count processed."""
-    _, outlook, calendar, analyzer, notifier, state = _build_components(settings)
+    email_client, calendar, analyzer, notifier, state = _build_components(settings)
 
     since = datetime.now(timezone.utc) - timedelta(
         minutes=settings.initial_lookback_minutes
     )
-    messages = outlook.list_unread(since=since)
+    messages = email_client.list_unread(since=since)
     logger.info("Found %d unread message(s) since %s", len(messages), since.isoformat())
 
     processed = 0
@@ -182,7 +215,7 @@ def run_once(settings: Settings) -> int:
                 analyzer=analyzer,
                 calendar=calendar,
                 notifier=notifier,
-                outlook=outlook,
+                email_client=email_client,
                 state=state,
             )
             processed += 1
@@ -192,7 +225,7 @@ def run_once(settings: Settings) -> int:
 
 
 def run_forever(settings: Settings) -> None:
-    _, outlook, calendar, analyzer, notifier, state = _build_components(settings)
+    email_client, calendar, analyzer, notifier, state = _build_components(settings)
 
     stop = {"now": False}
 
@@ -219,7 +252,7 @@ def run_forever(settings: Settings) -> None:
     while not stop["now"]:
         cycle_start = datetime.now(timezone.utc)
         try:
-            messages = outlook.list_unread(since=since)
+            messages = email_client.list_unread(since=since)
             for msg in messages:
                 if state.already_processed(msg.id):
                     continue
@@ -230,7 +263,7 @@ def run_forever(settings: Settings) -> None:
                         analyzer=analyzer,
                         calendar=calendar,
                         notifier=notifier,
-                        outlook=outlook,
+                        email_client=email_client,
                         state=state,
                     )
                 except Exception:
@@ -266,13 +299,25 @@ def main() -> int:
     _setup_logging(settings.debug)
 
     if args.auth:
-        auth = GraphAuth(
-            client_id=settings.ms_client_id,
-            tenant_id=settings.ms_tenant_id,
-            token_cache_path=settings.ms_token_cache_path,
-        )
-        token = auth.get_access_token()
-        logger.info("OAuth complete. Token acquired (length=%d).", len(token))
+        if settings.email_provider == "outlook":
+            from providers.ms_graph_auth import GraphAuth
+            auth = GraphAuth(
+                client_id=settings.ms_client_id,
+                tenant_id=settings.ms_tenant_id,
+                token_cache_path=settings.ms_token_cache_path,
+            )
+            token = auth.get_access_token()
+            logger.info("Microsoft OAuth complete. Token acquired (length=%d).", len(token))
+        elif settings.email_provider == "gmail":
+            from providers.google_auth import GoogleAuth
+            gauth = GoogleAuth(
+                client_secrets_path=settings.google_client_secrets_path,
+                token_cache_path=settings.google_token_cache_path,
+            )
+            creds = gauth.get_credentials()
+            logger.info("Google OAuth complete. Token valid: %s", bool(creds and creds.valid))
+        else:
+            raise RuntimeError(f"Unknown EMAIL_PROVIDER: {settings.email_provider}")
         return 0
 
     if args.once:

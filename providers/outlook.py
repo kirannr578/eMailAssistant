@@ -3,28 +3,18 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
 from datetime import datetime
 from html import unescape
 
 import requests
 from dateutil import parser as date_parser
 
+from .base import EmailMessage  # re-exported for backward compatibility
 from .ms_graph_auth import GRAPH_BASE_URL, GraphAuth
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class EmailMessage:
-    id: str
-    subject: str
-    sender: str
-    to: list[str]
-    received_at: datetime
-    body_text: str
-    web_link: str | None
-    is_read: bool
+__all__ = ["EmailMessage", "OutlookClient"]
 
 
 def _strip_html(html: str) -> str:

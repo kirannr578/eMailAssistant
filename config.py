@@ -58,22 +58,34 @@ class Settings:
     user_timezone: str
     default_meeting_duration_minutes: int
 
-    # Microsoft Graph
-    ms_client_id: str
-    ms_tenant_id: str
-    ms_token_cache_path: Path
+    # Provider selection: "outlook" (Microsoft 365) or "gmail" (Google Workspace / consumer Gmail).
+    email_provider: str
 
-    # OpenAI
-    openai_api_key: str
-    openai_model: str
+    # Microsoft Graph (only required if email_provider == "outlook")
+    ms_client_id: str = ""
+    ms_tenant_id: str = "common"
+    ms_token_cache_path: Path = Path("token_cache.bin")
+
+    # Google APIs (only required if email_provider == "gmail")
+    google_client_secrets_path: Path = Path("client_secret.json")
+    google_token_cache_path: Path = Path("google_token.json")
+    google_calendar_id: str = "primary"
+
+    # LLM (pluggable: openai, azure_openai, github_models, ollama, openai_compat)
+    llm_provider: str = "openai"
+    llm_api_key: str = ""
+    llm_model: str = "gpt-4o-mini"
+    llm_base_url: str = ""               # only for openai_compat / overriding defaults
+    azure_openai_endpoint: str = ""      # https://<resource>.openai.azure.com
+    azure_openai_api_version: str = ""
 
     # Twilio
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_from_sms: str
-    twilio_from_whatsapp: str
-    notify_to_sms: str
-    notify_to_whatsapp: str
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_sms: str = ""
+    twilio_from_whatsapp: str = ""
+    notify_to_sms: str = ""
+    notify_to_whatsapp: str = ""
 
     # Meta WhatsApp Cloud API (direct)
     meta_wa_phone_number_id: str = ""
@@ -83,7 +95,11 @@ class Settings:
     meta_wa_template_language: str = "en_US"
     meta_wa_api_version: str = "v21.0"
 
-    # Subset of {sms, whatsapp, whatsapp_meta}
+    # Telegram bot
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    # Subset of {sms, whatsapp, whatsapp_meta, telegram}
     notify_channels: list[str] = field(default_factory=list)
 
     # Agent
@@ -95,15 +111,52 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    # Backward compat: if LLM_* not set, fall back to OPENAI_* (older configs).
+    legacy_openai_key = _get("OPENAI_API_KEY", "")
+    legacy_openai_model = _get("OPENAI_MODEL", "")
+    llm_provider = _get("LLM_PROVIDER", "openai") or "openai"
+    llm_api_key = _get("LLM_API_KEY", legacy_openai_key)
+    llm_model = _get("LLM_MODEL", legacy_openai_model or "gpt-4o-mini")
+    if not llm_api_key and llm_provider != "ollama":
+        raise RuntimeError(
+            "Missing LLM credentials. Set LLM_API_KEY (or legacy OPENAI_API_KEY)."
+        )
+
+    email_provider = (_get("EMAIL_PROVIDER", "outlook") or "outlook").lower()
+    if email_provider not in ("outlook", "gmail"):
+        raise RuntimeError(
+            f"EMAIL_PROVIDER must be 'outlook' or 'gmail', got {email_provider!r}."
+        )
+    if email_provider == "outlook" and not _get("MS_CLIENT_ID", ""):
+        raise RuntimeError(
+            "EMAIL_PROVIDER=outlook requires MS_CLIENT_ID. "
+            "Run scripts/setup_entra.ps1 or set it manually."
+        )
+    if email_provider == "gmail":
+        gpath = Path(_get("GOOGLE_CLIENT_SECRETS_PATH", "client_secret.json"))
+        if not gpath.exists():
+            raise RuntimeError(
+                f"EMAIL_PROVIDER=gmail requires GOOGLE_CLIENT_SECRETS_PATH to point to "
+                f"a valid OAuth client JSON. Currently set to: {gpath}"
+            )
+
     return Settings(
         mailbox_address=_get("MAILBOX_ADDRESS", required=True),
         user_timezone=_get("USER_TIMEZONE", required=True),
         default_meeting_duration_minutes=_get_int("DEFAULT_MEETING_DURATION_MINUTES", 30),
-        ms_client_id=_get("MS_CLIENT_ID", required=True),
+        email_provider=email_provider,
+        ms_client_id=_get("MS_CLIENT_ID", ""),
         ms_tenant_id=_get("MS_TENANT_ID", "common"),
         ms_token_cache_path=Path(_get("MS_TOKEN_CACHE_PATH", "token_cache.bin")),
-        openai_api_key=_get("OPENAI_API_KEY", required=True),
-        openai_model=_get("OPENAI_MODEL", "gpt-4o-mini"),
+        google_client_secrets_path=Path(_get("GOOGLE_CLIENT_SECRETS_PATH", "client_secret.json")),
+        google_token_cache_path=Path(_get("GOOGLE_TOKEN_CACHE_PATH", "google_token.json")),
+        google_calendar_id=_get("GOOGLE_CALENDAR_ID", "primary"),
+        llm_provider=llm_provider,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+        llm_base_url=_get("LLM_BASE_URL", ""),
+        azure_openai_endpoint=_get("AZURE_OPENAI_ENDPOINT", ""),
+        azure_openai_api_version=_get("AZURE_OPENAI_API_VERSION", ""),
         twilio_account_sid=_get("TWILIO_ACCOUNT_SID", ""),
         twilio_auth_token=_get("TWILIO_AUTH_TOKEN", ""),
         twilio_from_sms=_get("TWILIO_FROM_SMS", ""),
@@ -116,7 +169,9 @@ def load_settings() -> Settings:
         meta_wa_template_name=_get("META_WA_TEMPLATE_NAME", ""),
         meta_wa_template_language=_get("META_WA_TEMPLATE_LANGUAGE", "en_US"),
         meta_wa_api_version=_get("META_WA_API_VERSION", "v21.0"),
-        notify_channels=_get_list("NOTIFY_CHANNELS", ["whatsapp_meta"]),
+        telegram_bot_token=_get("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=_get("TELEGRAM_CHAT_ID", ""),
+        notify_channels=_get_list("NOTIFY_CHANNELS", ["telegram"]),
         poll_interval_seconds=_get_int("POLL_INTERVAL_SECONDS", 60),
         auto_block_confidence=_get_float("AUTO_BLOCK_CONFIDENCE", 0.75),
         initial_lookback_minutes=_get_int("INITIAL_LOOKBACK_MINUTES", 60),

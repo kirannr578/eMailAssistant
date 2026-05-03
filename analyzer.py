@@ -14,12 +14,32 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from dateutil import parser as date_parser
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 logger = logging.getLogger(__name__)
 
 Urgency = Literal["low", "medium", "high"]
+
+# All providers we support. Keep names short and lower_snake.
+PROVIDER_OPENAI = "openai"                 # api.openai.com (paid)
+PROVIDER_AZURE_OPENAI = "azure_openai"     # your-resource.openai.azure.com (work account)
+PROVIDER_GITHUB_MODELS = "github_models"   # models.github.ai/inference (free with GitHub PAT)
+PROVIDER_OLLAMA = "ollama"                 # localhost:11434/v1 (free, local)
+PROVIDER_OPENAI_COMPAT = "openai_compat"   # generic OpenAI-compatible endpoint
+
+VALID_PROVIDERS = {
+    PROVIDER_OPENAI,
+    PROVIDER_AZURE_OPENAI,
+    PROVIDER_GITHUB_MODELS,
+    PROVIDER_OLLAMA,
+    PROVIDER_OPENAI_COMPAT,
+}
+
+DEFAULT_BASE_URLS = {
+    PROVIDER_GITHUB_MODELS: "https://models.github.ai/inference",
+    PROVIDER_OLLAMA: "http://localhost:11434/v1",
+}
 
 
 class Analysis(BaseModel):
@@ -103,9 +123,68 @@ Subject: {subject}
 """
 
 
+def _build_client(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    base_url: str,
+    azure_endpoint: str,
+    azure_api_version: str,
+):
+    """Instantiate the right SDK client for the chosen provider.
+
+    All non-Azure providers use the OpenAI Python SDK with a custom base_url -
+    this works for OpenAI, GitHub Models, Ollama, and any OpenAI-compatible
+    server (LM Studio, vLLM, llama.cpp server, etc.).
+    """
+    if provider not in VALID_PROVIDERS:
+        raise ValueError(
+            f"Unknown LLM_PROVIDER {provider!r}. Valid: {sorted(VALID_PROVIDERS)}"
+        )
+
+    if provider == PROVIDER_AZURE_OPENAI:
+        if not azure_endpoint:
+            raise RuntimeError("LLM_PROVIDER=azure_openai requires AZURE_OPENAI_ENDPOINT.")
+        return AzureOpenAI(
+            api_key=api_key,
+            api_version=azure_api_version or "2024-08-01-preview",
+            azure_endpoint=azure_endpoint,
+        )
+
+    # All other providers go through the standard OpenAI client.
+    effective_base_url = base_url or DEFAULT_BASE_URLS.get(provider) or None
+
+    # Ollama doesn't need a real API key but the SDK requires a non-empty value.
+    effective_api_key = api_key or ("ollama" if provider == PROVIDER_OLLAMA else "")
+    if not effective_api_key:
+        raise RuntimeError(f"LLM_PROVIDER={provider} requires an API key.")
+
+    return OpenAI(api_key=effective_api_key, base_url=effective_base_url)
+
+
 class EmailAnalyzer:
-    def __init__(self, *, api_key: str, model: str, user_timezone: str) -> None:
-        self._client = OpenAI(api_key=api_key)
+    def __init__(
+        self,
+        *,
+        provider: str = PROVIDER_OPENAI,
+        api_key: str,
+        model: str,
+        user_timezone: str,
+        base_url: str = "",
+        azure_endpoint: str = "",
+        azure_api_version: str = "",
+    ) -> None:
+        self._provider = provider
+        self._client = _build_client(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            azure_endpoint=azure_endpoint,
+            azure_api_version=azure_api_version,
+        )
+        # For Azure, the "model" param is actually the deployment name.
         self._model = model
         self._user_timezone = user_timezone
 
@@ -122,31 +201,49 @@ class EmailAnalyzer:
             sender=sender,
             to=to,
             subject=subject,
-            body=body[:8000],  # hard cap: avoid blowing context on huge threads
+            body=body[:8000],
             received_iso=received_at.isoformat(),
             user_timezone=self._user_timezone,
         )
 
-        resp = self._client.chat.completions.create(
+        # response_format json_object is supported by OpenAI/Azure/GitHub Models.
+        # Some smaller / local models (older Ollama models) ignore it but still
+        # tend to produce JSON when instructed; we validate either way.
+        kwargs = dict(
             model=self._model,
-            response_format={"type": "json_object"},
             temperature=0.1,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
+        if self._provider != PROVIDER_OLLAMA:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as e:
+            logger.error("LLM (%s) call failed: %s", self._provider, e)
+            return _fallback_analysis(subject, sender)
+
         raw = resp.choices[0].message.content or "{}"
+        # Some models wrap JSON in ```json fences; strip them defensively.
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            logger.warning("LLM returned invalid JSON: %s\nRaw: %s", e, raw)
+            logger.warning("LLM returned invalid JSON: %s\nRaw: %s", e, raw[:500])
             return _fallback_analysis(subject, sender)
 
         try:
             return Analysis(**data)
         except ValidationError as e:
-            logger.warning("LLM JSON failed schema validation: %s\nRaw: %s", e, raw)
+            logger.warning("LLM JSON failed schema validation: %s\nRaw: %s", e, raw[:500])
             return _fallback_analysis(subject, sender)
 
 

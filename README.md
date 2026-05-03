@@ -1,7 +1,8 @@
 # Email Assistant
 
-An autonomous agent that monitors any Microsoft 365 mailbox, reads each new
-unread email with an LLM, and:
+An autonomous agent that monitors a mailbox (Microsoft 365 **or** Gmail / Google
+Workspace), reads each new unread email with an LLM (OpenAI, GitHub Models,
+Azure OpenAI, or local Ollama), and:
 
 - Detects whether it's a **meeting request** (extracting the proposed time).
 - For high-confidence meeting requests, **blocks your Outlook calendar**
@@ -72,19 +73,31 @@ Twilio (their security models prevent automation).
 
 ### Prerequisites you set up in a browser
 
-You need **OpenAI** (for the LLM) and **one notification channel**. Pick one:
+You need **one mailbox provider**, **one LLM provider**, and **one notification
+channel**. Free options exist in every category:
 
-1. **OpenAI** (~3 min): create a key at <https://platform.openai.com/api-keys>
-   and add ~$5 of credit at the billing page. `gpt-4o-mini` costs ~$0.0001 per
-   email -> $5 lasts effectively forever.
-2. **Notification channel - pick ONE** (the agent supports any combination):
-   - **Meta WhatsApp Cloud API direct** (~30 min, free up to 1000/mo) -
-     see "Meta WhatsApp Cloud API setup" section below for the full walkthrough.
-   - **Twilio WhatsApp sandbox** (~5 min, free for testing) -
-     <https://www.twilio.com/try-twilio>, then Console -> Messaging -> Try it out.
-     Note the WhatsApp 24-hour session-window limit applies.
-   - **Twilio SMS** (~10 min, real SMS, ~$0.008/msg after $15 trial credit) -
-     same Twilio signup; buy an SMS-capable number.
+#### Mailbox / Calendar (pick ONE)
+- **Microsoft 365 / Outlook** - register a free Entra app (auto-script provided).
+- **Gmail / Google Workspace** - create a free Google Cloud project, enable
+  Gmail + Calendar APIs, download an OAuth client JSON. See "Gmail / Google
+  Workspace setup" section below.
+
+#### LLM provider (pick ONE)
+| Provider | Cost | Setup |
+|---|---|---|
+| **OpenAI** (default) | ~$0.0001/email | <https://platform.openai.com/api-keys> + add $5 credit |
+| **GitHub Models** | **FREE** with daily quota | <https://github.com/settings/tokens> -> create fine-grained PAT (no scopes needed) |
+| **Azure OpenAI** | Your Azure billing | Use your existing deployment |
+| **Ollama (local)** | **FREE**, runs on your laptop | `winget install Ollama.Ollama` then `ollama pull llama3.1:8b` |
+| **OpenAI-compatible** | Varies | Any LM Studio / vLLM / llama.cpp endpoint |
+
+#### Notification channel (pick one or more)
+| Channel | Cost | Setup |
+|---|---|---|
+| **Telegram bot** (recommended) | **FREE** forever | Message @BotFather in Telegram -> `/newbot` |
+| **Meta WhatsApp Cloud API** | Free up to 1000/mo | 30-min Business Manager setup. See "Meta WhatsApp Cloud API setup". |
+| **Twilio WhatsApp sandbox** | Free for testing | Twilio signup + WhatsApp join code. 24h-window limit. |
+| **Twilio SMS** | $15 trial credit, then ~$0.008/SMS | Twilio signup + buy an SMS-capable number |
 
 ### One-time setup on the laptop
 
@@ -137,6 +150,25 @@ The Entra app registration can be done manually in the portal in ~5 min:
    `Mail.ReadWrite`, `Calendars.ReadWrite`, `User.Read`, `offline_access`.
    Click "Grant admin consent" (admin only).
 5. Copy the Application (client) ID and your tenant ID. Use them in step 3 above.
+
+## Telegram bot setup (recommended notification channel)
+
+5 minutes, free forever, no phone number gymnastics.
+
+1. Install Telegram on your phone (App Store / Play Store, free).
+2. In Telegram, search **@BotFather** -> open chat -> tap **Start**.
+3. Send `/newbot`. BotFather asks for:
+   - A display name for your bot (e.g. `Email Assistant Bot`)
+   - A username ending in `bot` (e.g. `rocky_email_bot`)
+4. BotFather replies with a token like `7891234567:AAH...xyz`. **Copy it.**
+5. In Telegram, search for the username you just picked -> open the chat ->
+   tap **Start**. Send any message (e.g. `hi`).
+6. Run the wizard - it auto-discovers your chat ID:
+   ```powershell
+   python main.py --setup
+   ```
+   Pick `[1] Telegram bot`, paste the token, the wizard polls Telegram and
+   finds your chat ID automatically.
 
 ## Meta WhatsApp Cloud API setup
 
@@ -266,6 +298,68 @@ Part A.5, you need to:
 
 For personal use this is overkill. Skip it.
 
+## Gmail / Google Workspace setup
+
+This is the equivalent of the "Microsoft Entra app registration" for Google.
+Budget ~10 min. End result: a `client_secret.json` file the agent uses to
+sign you in to Gmail and Google Calendar.
+
+1. **Create a Google Cloud project** (free)
+   <https://console.cloud.google.com/projectcreate> -> name `Email Assistant` -> Create.
+   Make sure the new project is selected in the top dropdown.
+
+2. **Enable the Gmail and Calendar APIs**
+   - <https://console.cloud.google.com/apis/library/gmail.googleapis.com> -> **Enable**
+   - <https://console.cloud.google.com/apis/library/calendar-json.googleapis.com> -> **Enable**
+
+3. **Configure the OAuth consent screen**
+   <https://console.cloud.google.com/apis/credentials/consent>
+   - User type: **External** (unless you have Google Workspace and want Internal).
+   - App name: `Email Assistant`. User support email: yours.
+   - Developer contact: yours. Save.
+   - **Scopes** page: click "Add or remove scopes", search for and add:
+     - `https://www.googleapis.com/auth/gmail.modify`
+     - `https://www.googleapis.com/auth/calendar`
+   - **Test users** page: add your own Google account email. Save.
+   - (You don't need to "publish" the app for personal use - leaving it in
+     Testing mode is fine, but Google will require you to re-consent every
+     7 days unless you publish.)
+
+4. **Create the OAuth client**
+   <https://console.cloud.google.com/apis/credentials> -> **+ Create credentials** ->
+   **OAuth client ID**.
+   - Application type: **Desktop app**
+   - Name: `Email Assistant Desktop`
+   - Click Create -> popup shows Client ID + secret.
+   - Click **Download JSON** -> save the file as `client_secret.json` in the
+     project root (`C:\Users\rnuduru1\eMail assistant\client_secret.json`).
+     This file is gitignored.
+
+5. **Run the wizard**
+   ```powershell
+   python main.py --setup
+   ```
+   Pick **[2] Google / Gmail** when asked for the email provider. The wizard
+   verifies the JSON exists, then:
+
+   ```powershell
+   python main.py --auth
+   ```
+
+   Opens your browser; sign in to your Gmail account; click "Continue" past
+   the unverified-app warning (because you didn't publish the app); approve
+   the Gmail + Calendar scopes. Done. Refresh token is cached to
+   `google_token.json` (also gitignored).
+
+### Optional: publishing the OAuth app
+
+If the 7-day re-consent in Testing mode annoys you:
+- OAuth consent screen -> **Publish app** -> confirm.
+- For personal use Google does NOT require verification when you only request
+  the scopes you have (gmail.modify and calendar count as "sensitive" but you
+  can use them in Production mode for personal accounts indefinitely; only
+  reverification is needed if you add restricted scopes).
+
 ## Configuration reference
 
 All knobs live in `.env` (see `.env.example` for documented examples):
@@ -276,8 +370,12 @@ All knobs live in `.env` (see `.env.example` for documented examples):
 | `USER_TIMEZONE` | IANA timezone (e.g. `America/New_York`, `Europe/London`, `Asia/Singapore`). Used for parsing relative times and creating calendar events. The setup wizard auto-detects this from your machine. |
 | `DEFAULT_MEETING_DURATION_MINUTES` | Used when an email proposes a start time but no end. |
 | `MS_CLIENT_ID`, `MS_TENANT_ID` | App-registration identifiers. |
-| `OPENAI_MODEL` | Defaults to `gpt-4o-mini` (cheap + plenty smart for triage). Swap for `gpt-4.1` or similar. |
-| `NOTIFY_CHANNELS` | Comma-separated subset of `sms,whatsapp,whatsapp_meta`. |
+| `EMAIL_PROVIDER` | `outlook` or `gmail`. Determines which providers are used. |
+| `LLM_PROVIDER` | `openai`, `azure_openai`, `github_models`, `ollama`, or `openai_compat`. |
+| `LLM_MODEL` | Provider-specific model name. For Azure, this is the *deployment* name. |
+| `LLM_BASE_URL` | Override default endpoint. Required for `openai_compat`. |
+| `NOTIFY_CHANNELS` | Comma-separated subset of `telegram,whatsapp_meta,whatsapp,sms`. |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telegram bot credentials. Wizard auto-discovers chat ID. |
 | `META_WA_PHONE_NUMBER_ID` | Numeric ID from Meta App -> WhatsApp -> API Setup. NOT the phone number itself. |
 | `META_WA_ACCESS_TOKEN` | Long-lived System User token (`whatsapp_business_messaging` + `whatsapp_business_management`). |
 | `META_WA_RECIPIENT` | Your WhatsApp number, digits only (no `+`). E.g. `15125551234`. |

@@ -11,19 +11,19 @@ from dataclasses import dataclass, field
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client as TwilioClient
 
+from .telegram import TelegramClient, TelegramConfig
 from .whatsapp_meta import MetaWhatsAppClient, MetaWhatsAppConfig
 
 logger = logging.getLogger(__name__)
 
-# WhatsApp text body cap is 4096; SMS multi-part still works but is wasteful.
-# We cap notifications well below both to keep them readable.
 MAX_NOTIFICATION_CHARS = 1500
 
 CHANNEL_SMS = "sms"
 CHANNEL_TWILIO_WA = "whatsapp"           # Twilio WhatsApp (sandbox or paid)
 CHANNEL_META_WA = "whatsapp_meta"        # Meta WhatsApp Cloud API direct
+CHANNEL_TELEGRAM = "telegram"            # Telegram bot (free, recommended)
 
-VALID_CHANNELS = {CHANNEL_SMS, CHANNEL_TWILIO_WA, CHANNEL_META_WA}
+VALID_CHANNELS = {CHANNEL_SMS, CHANNEL_TWILIO_WA, CHANNEL_META_WA, CHANNEL_TELEGRAM}
 
 
 @dataclass
@@ -44,7 +44,11 @@ class NotifierConfig:
     meta_template_language: str = "en_US"
     meta_api_version: str = "v21.0"
 
-    # Subset of {sms, whatsapp, whatsapp_meta}
+    # Telegram
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+    # Subset of VALID_CHANNELS
     channels: list[str] = field(default_factory=list)
 
 
@@ -53,6 +57,7 @@ class Notifier:
         self._cfg = config
         self._twilio: TwilioClient | None = None
         self._meta: MetaWhatsAppClient | None = None
+        self._telegram: TelegramClient | None = None
 
         needs_twilio = any(c in config.channels for c in (CHANNEL_SMS, CHANNEL_TWILIO_WA))
         if needs_twilio:
@@ -81,6 +86,19 @@ class Notifier:
                     "META_WA_ACCESS_TOKEN, or META_WA_RECIPIENT missing."
                 )
 
+        if CHANNEL_TELEGRAM in config.channels:
+            if config.telegram_bot_token and config.telegram_chat_id:
+                self._telegram = TelegramClient(
+                    TelegramConfig(
+                        bot_token=config.telegram_bot_token,
+                        chat_id=config.telegram_chat_id,
+                    )
+                )
+            else:
+                logger.warning(
+                    "telegram channel requested but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing."
+                )
+
         unknown = set(config.channels) - VALID_CHANNELS
         for ch in unknown:
             logger.warning("Unknown notifier channel '%s' (valid: %s).", ch, VALID_CHANNELS)
@@ -101,6 +119,8 @@ class Notifier:
                     any_ok |= self._send_twilio_whatsapp(body)
                 elif channel == CHANNEL_META_WA:
                     any_ok |= self._send_meta_whatsapp(body)
+                elif channel == CHANNEL_TELEGRAM:
+                    any_ok |= self._send_telegram(body)
                 # unknown channel already logged in __init__
             except Exception as e:
                 logger.error("Notifier channel %s raised unexpected error: %s", channel, e)
@@ -143,3 +163,8 @@ class Notifier:
         if not self._meta:
             return False
         return self._meta.send(body)
+
+    def _send_telegram(self, body: str) -> bool:
+        if not self._telegram:
+            return False
+        return self._telegram.send(body)

@@ -22,6 +22,8 @@ env/
 # Auth token caches (NEVER commit these)
 token_cache.json
 token_cache.bin
+google_token.json
+client_secret*.json
 *.token
 
 # Local SQLite state
