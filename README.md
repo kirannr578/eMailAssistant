@@ -49,6 +49,11 @@ Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 
 ```
 .
+├── Install.cmd             # Double-click launcher (runs everything end-to-end on a dev machine)
+├── EmailAssistant.spec     # PyInstaller spec - bundles Python + source into a frozen exe
+├── installer/
+│   └── installer.iss       # Inno Setup script - wraps the bundle into EmailAssistantSetup.exe
+├── build_installer.ps1     # One-shot build: PyInstaller -> Inno Setup -> dist/EmailAssistantSetup.exe
 ├── bootstrap.ps1           # Installs Python, creates venv, pip installs
 ├── main.py                 # Entry point: --setup | --auth | --once | (default loop)
 ├── setup_wizard.py         # Interactive .env builder with live credential validation
@@ -87,12 +92,19 @@ Auth: MSAL device-code flow, refresh-token cached on disk (token_cache.bin).
 
 ## Quick start (Windows / PowerShell)
 
-The whole thing is **5 commands + paste a handful of secrets**. Helper scripts
-handle Python install, venv, dependencies, Entra app registration (incl. the
-OneDrive `Files.ReadWrite` scope for bid document capture), and Task Scheduler
-registration. The only things you must do yourself are sign up for your chosen
-LLM provider and notification channel - their security models prevent
-automation.
+**The fastest path: double-click `Install.cmd`** in the project root. It chains
+all five setup steps below into a single guided run, prompts you only where
+input is genuinely required (Outlook vs Gmail, optional Scheduled Task), and
+auto-strips the Mark-of-the-Web that otherwise causes the "not digitally
+signed" PowerShell error on corporate laptops. If it fails partway, just
+re-run it - every step is idempotent.
+
+Prefer the manual flow? It's **5 commands + paste a handful of secrets**.
+Helper scripts handle Python install, venv, dependencies, Entra app
+registration (incl. the OneDrive `Files.ReadWrite` scope for bid document
+capture), and Task Scheduler registration. The only things you must do
+yourself are sign up for your chosen LLM provider and notification channel -
+their security models prevent automation.
 
 ### Prerequisites you set up in a browser
 
@@ -190,6 +202,116 @@ The Entra app registration can be done manually in the portal in ~5 min:
    `offline_access`.
    Click "Grant admin consent" (admin only).
 5. Copy the Application (client) ID and your tenant ID. Use them in step 3 above.
+
+## Build a redistributable installer (Windows .exe)
+
+Want a polished `EmailAssistantSetup.exe` you can copy to another laptop and
+double-click? The repo ships with a PyInstaller spec + Inno Setup script that
+together produce a single self-contained Windows installer (Welcome screen,
+Start Menu shortcuts, Add/Remove Programs entry, clean uninstaller, optional
+Scheduled Task registration on the Finish page).
+
+End users do NOT need Python, a venv, or any of the other prerequisites - the
+installer bundles a private Python runtime alongside the app.
+
+### One-time build prerequisites (on the build machine only)
+
+1. Run `bootstrap.ps1` so `.venv` and the runtime deps exist.
+2. Install Inno Setup 6 (free):
+   ```powershell
+   winget install -e --id JRSoftware.InnoSetup
+   ```
+   (Or download the installer from <https://jrsoftware.org/isdl.php>.)
+
+### Build
+
+```powershell
+.\build_installer.ps1
+```
+
+This:
+1. Installs PyInstaller into `.venv` (via `requirements-dev.txt`).
+2. Cleans `build/` and `dist/EmailAssistant/`.
+3. Runs PyInstaller against `EmailAssistant.spec`, producing
+   `dist\EmailAssistant\EmailAssistant.exe` (~16 MB exe + ~150 MB of bundled
+   deps in the same folder).
+4. Runs Inno Setup against `installer\installer.iss`, producing
+   `dist\EmailAssistantSetup.exe` (~50-70 MB after LZMA2 compression).
+
+Flags for iterating:
+
+```powershell
+.\build_installer.ps1 -SkipPyInstaller   # only re-compile the Inno Setup wrapper
+.\build_installer.ps1 -SkipInno          # only rebuild the PyInstaller bundle
+```
+
+### What the installer does on the target machine
+
+- Per-user install (no UAC, no admin) to
+  `%LOCALAPPDATA%\Programs\EmailAssistant\`.
+- Creates Start Menu shortcuts in a group called "Email Assistant":
+  - **Email Assistant (Run continuously)** - the polling daemon
+  - **Email Assistant - Setup Wizard** (`--setup`)
+  - **Email Assistant - Sign In** (`--auth`)
+  - **Email Assistant - Run Once (smoke test)** (`--once`)
+  - **Open Data Folder** - opens `%LOCALAPPDATA%\EmailAssistant\` directly
+  - **Uninstall Email Assistant**
+- The Finish page offers two opt-in checkboxes: *Run the Setup Wizard now* and
+  *Schedule the agent to run every 5 minutes (Task Scheduler)*.
+- Adds an "Email Assistant" entry to **Settings -> Apps -> Installed apps** for
+  clean uninstall.
+
+### Where data lives at runtime
+
+The frozen exe pins its working directory to `%LOCALAPPDATA%\EmailAssistant\`
+(NOT the install dir) on every launch. That folder holds:
+
+- `.env`           - your config, written by the Setup Wizard
+- `state.db`       - SQLite dedup state
+- `token_cache.bin` / `google_token.json` - OAuth refresh tokens
+- `client_secret.json` (Gmail users only) - drop yours here
+
+This separation means uninstalling the program does NOT wipe your `.env` or
+tokens; reinstalling picks up where you left off. To reset state, delete the
+folder manually.
+
+You can override the data dir for special cases (testing, multiple mailboxes
+on one machine) with the env var `EMAIL_ASSISTANT_DATA_DIR`.
+
+### First-run on a fresh laptop
+
+1. Copy `dist\EmailAssistantSetup.exe` to the target laptop (USB / OneDrive / email).
+2. Double-click. Windows SmartScreen will warn ("unrecognized publisher")
+   because the installer isn't code-signed - click **More info -> Run anyway**.
+3. The Inno Setup wizard runs: Welcome -> Install location -> Ready -> Install -> Finish.
+4. On the Finish page, tick **Run the Setup Wizard now** and **Schedule the
+   agent to run every 5 minutes** if you want full setup in one go.
+5. Setup Wizard collects credentials (mailbox, LLM, notification channel) and
+   validates each one with a live API call.
+6. Use the Start Menu **Email Assistant - Sign In** shortcut once to complete
+   OAuth (browser pops up, or device code is printed in the console).
+7. The Scheduled Task takes over from there - it runs `--once` every 5 minutes
+   silently in the background.
+
+### Updating an installed copy
+
+Build a new `EmailAssistantSetup.exe` with a bumped version (edit
+`AppVersion` in `installer\installer.iss`) and run it on the target. Inno
+Setup detects the existing install via `AppId` and upgrades in place. The
+data folder (`%LOCALAPPDATA%\EmailAssistant\`) is untouched.
+
+### Caveats
+
+- **No code signing.** Windows SmartScreen + corporate AV may flag the unsigned
+  exe. For personal use on your own laptop, "Run anyway" is fine. For wider
+  distribution, get a code-signing cert (~$200/yr from a CA like SSL.com) and
+  add `SignTool="..."` to the `[Setup]` section of `installer.iss`.
+- **One-folder bundle, not one-file.** PyInstaller's `--onefile` mode
+  re-extracts ~150 MB to `%TEMP%` on every launch - bad for a 5-min cron. The
+  spec uses one-folder mode (faster, files persistent on disk inside the install).
+- **Build is x64-only.** The `[Setup]` section pins
+  `ArchitecturesAllowed=x64compatible`. Modern Windows is universally x64;
+  drop that line if you ever need ARM64 / x86 targets.
 
 ## Telegram bot setup (recommended notification channel)
 

@@ -19,10 +19,36 @@ import tls_setup  # noqa: F401  (side-effect import)
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+
+# When packaged as a frozen exe (PyInstaller / Inno Setup install), the CWD
+# at launch depends on whoever started us (Start Menu, Task Scheduler, a
+# random shortcut). Pin it to a stable per-user data dir so that .env,
+# state.db, token_cache.bin, etc. always resolve to the same place across
+# runs and survive reinstalls. This dir lives outside Program Files so it
+# stays user-writable and isn't wiped by an uninstall.
+def _pin_data_dir_when_frozen() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    data_root = os.environ.get("EMAIL_ASSISTANT_DATA_DIR")
+    if data_root:
+        target = Path(data_root)
+    elif os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        target = Path(base) / "EmailAssistant"
+    else:
+        target = Path.home() / ".email-assistant"
+    target.mkdir(parents=True, exist_ok=True)
+    os.chdir(target)
+
+
+_pin_data_dir_when_frozen()
 
 from analyzer import (
     Analysis,
@@ -573,7 +599,24 @@ def main() -> int:
         from setup_wizard import run_wizard
         return run_wizard()
 
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except RuntimeError as e:
+        # Friendly error for missing/invalid .env. Most common cause: user
+        # double-clicked the daemon shortcut before running the Setup Wizard.
+        # Print a clean message instead of the raw Python traceback (which
+        # PyInstaller wraps with [PYI-...:ERROR] noise on stderr).
+        sys.stderr.write(
+            "\n"
+            "Email Assistant cannot start: configuration is missing or incomplete.\n"
+            f"\n  Reason: {e}\n"
+            "\nFix:\n"
+            "  1. Run the Setup Wizard (Start Menu -> 'Email Assistant - Setup Wizard',\n"
+            "     or:  EmailAssistant.exe --setup).\n"
+            "  2. Then sign in:  EmailAssistant.exe --auth\n"
+            "  3. Then re-run this command.\n\n"
+        )
+        return 2
     _setup_logging(settings.debug)
 
     if args.auth:
