@@ -11,6 +11,12 @@ Run:
 """
 from __future__ import annotations
 
+# IMPORTANT: tls_setup must be imported before any module that performs an
+# HTTPS request (openai SDK, msal, requests, googleapiclient, etc.). It
+# wires Python's TLS verification to the OS trust store so corporate
+# MITM-inspection root CAs are honored.
+import tls_setup  # noqa: F401  (side-effect import)
+
 import argparse
 import logging
 import signal

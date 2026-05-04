@@ -40,6 +40,9 @@ from pathlib import Path
 # Make project root importable when run as `python tools/test_analyze.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Trust OS cert store before any HTTPS call to the LLM.
+import tls_setup  # noqa: E402, F401
+
 from analyzer import Analysis, EmailAnalyzer  # noqa: E402
 from config import load_settings  # noqa: E402
 from dateutil import parser as date_parser  # noqa: E402

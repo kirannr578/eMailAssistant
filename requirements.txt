@@ -6,6 +6,11 @@ python-dotenv>=1.0.1
 python-dateutil>=2.9.0
 pydantic>=2.7.0
 tzlocal>=5.2
+# Delegate TLS cert verification to the OS trust store so corporate
+# MITM-inspection root CAs (installed in Windows / macOS keychain) are
+# honored without exporting them to certifi. Critical in enterprise
+# environments where api.openai.com etc. are TLS-intercepted.
+truststore>=0.9.0
 
 google-api-python-client>=2.130.0
 google-auth>=2.30.0

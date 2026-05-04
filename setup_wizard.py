@@ -7,6 +7,10 @@ Run via: python main.py --setup
 """
 from __future__ import annotations
 
+# Trust the OS cert store so live LLM / Twilio / Telegram validation calls
+# work behind corporate TLS-inspection proxies. Must be first import.
+import tls_setup  # noqa: F401
+
 import getpass
 import os
 import re
