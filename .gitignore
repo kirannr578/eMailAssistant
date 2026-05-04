@@ -51,3 +51,8 @@ entra_app.txt
 # Temporary commit message files
 .commit_msg.tmp
 *.commit_msg.tmp
+
+# Local one-shot diagnostic / smoke-test scripts (never commit; they reference live secrets)
+_verify_*.py
+_smoke_*.py
+_diag_*.py

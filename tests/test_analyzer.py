@@ -5,10 +5,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import json
+
 from analyzer import (
     Analysis,
     _company_context,
     _fallback_analysis,
+    _parse_llm_json,
     derive_bid_reminder_window,
     derive_meeting_window,
     derive_pre_bid_window,
@@ -296,3 +299,63 @@ def test_pre_bid_contact_separate_from_bid_contact():
     assert a.bid_contact != a.pre_bid_contact
     assert "Hodge" in a.pre_bid_contact
     assert "Solis" in a.bid_contact
+
+
+# --- _parse_llm_json -----------------------------------------------------
+# Different models emit JSON differently; the parser must tolerate all of these.
+
+
+def test_parse_llm_json_plain_object():
+    assert _parse_llm_json('{"a": 1, "b": "two"}') == {"a": 1, "b": "two"}
+
+
+def test_parse_llm_json_strips_markdown_fence_with_json_tag():
+    raw = "```json\n{\"a\": 2}\n```"
+    assert _parse_llm_json(raw) == {"a": 2}
+
+
+def test_parse_llm_json_strips_markdown_fence_no_language_tag():
+    raw = "```\n{\"a\": 3}\n```"
+    assert _parse_llm_json(raw) == {"a": 3}
+
+
+def test_parse_llm_json_handles_llama31_preamble_with_fences():
+    """The exact failure mode observed live with Ollama llama3.1:8b on
+    rocky@blueprintconstructs.com's first run, May 3 2026."""
+    raw = (
+        "Here is the JSON output:\n\n```\n"
+        '{"is_meeting_request": false, "meeting_confidence": 0.0}\n'
+        "```"
+    )
+    parsed = _parse_llm_json(raw)
+    assert parsed["is_meeting_request"] is False
+    assert parsed["meeting_confidence"] == 0.0
+
+
+def test_parse_llm_json_handles_preamble_no_fences():
+    raw = 'Sure, here you go: {"x": 3} hope that helps!'
+    assert _parse_llm_json(raw) == {"x": 3}
+
+
+def test_parse_llm_json_tolerates_leading_and_trailing_whitespace():
+    assert _parse_llm_json('   \n\n{"k": 1}\n  ') == {"k": 1}
+
+
+def test_parse_llm_json_raises_on_empty_string():
+    with pytest.raises(json.JSONDecodeError):
+        _parse_llm_json("")
+
+
+def test_parse_llm_json_raises_on_pure_prose():
+    with pytest.raises(json.JSONDecodeError):
+        _parse_llm_json("I cannot help with that request.")
+
+
+def test_parse_llm_json_handles_nested_objects_with_preamble():
+    raw = (
+        "Output:\n"
+        '{"outer": {"inner": [1, 2, {"deep": true}]}, "x": null}'
+    )
+    parsed = _parse_llm_json(raw)
+    assert parsed["outer"]["inner"][2]["deep"] is True
+    assert parsed["x"] is None

@@ -367,9 +367,11 @@ class EmailAnalyzer:
             user_timezone=self._user_timezone,
         )
 
-        # response_format json_object is supported by OpenAI/Azure/GitHub Models.
-        # Some smaller / local models (older Ollama models) ignore it but still
-        # tend to produce JSON when instructed; we validate either way.
+        # response_format=json_object is honored by OpenAI, Azure OpenAI,
+        # GitHub Models, AND Ollama (>= 0.1.18) on its OpenAI-compat endpoint.
+        # We send it for everyone; providers that don't recognize it still tend
+        # to produce JSON because of the system prompt, and our extractor below
+        # tolerates preambles/fences either way.
         kwargs = dict(
             model=self._model,
             temperature=0.1,
@@ -377,9 +379,8 @@ class EmailAnalyzer:
                 {"role": "system", "content": self._system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            response_format={"type": "json_object"},
         )
-        if self._provider != PROVIDER_OLLAMA:
-            kwargs["response_format"] = {"type": "json_object"}
 
         try:
             resp = self._client.chat.completions.create(**kwargs)
@@ -388,15 +389,8 @@ class EmailAnalyzer:
             return _fallback_analysis(subject, sender)
 
         raw = resp.choices[0].message.content or "{}"
-        # Some models wrap JSON in ```json fences; strip them defensively.
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`")
-            if raw.lower().startswith("json"):
-                raw = raw[4:].strip()
-
         try:
-            data = json.loads(raw)
+            data = _parse_llm_json(raw)
         except json.JSONDecodeError as e:
             logger.warning("LLM returned invalid JSON: %s\nRaw: %s", e, raw[:500])
             return _fallback_analysis(subject, sender)
@@ -406,6 +400,55 @@ class EmailAnalyzer:
         except ValidationError as e:
             logger.warning("LLM JSON failed schema validation: %s\nRaw: %s", e, raw[:500])
             return _fallback_analysis(subject, sender)
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Best-effort JSON extraction from an LLM response.
+
+    Handles three failure modes seen in the wild:
+      1. Plain JSON object        -> parse as-is.
+      2. Wrapped in ```json fences -> strip fences then parse.
+      3. Preamble / postamble prose around a JSON object
+         (e.g. llama3.1's "Here is the JSON output:\n\n```\n{...")
+         -> slice from first '{' to matching last '}' then parse.
+
+    Raises json.JSONDecodeError if no parseable object is recoverable.
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise json.JSONDecodeError("empty LLM response", "", 0)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strip ```json ... ``` fences (with or without language tag, anywhere in text).
+    fence_open = text.find("```")
+    if fence_open != -1:
+        fence_inner = text[fence_open + 3 :]
+        if fence_inner.lower().startswith("json"):
+            fence_inner = fence_inner[4:]
+        fence_close = fence_inner.rfind("```")
+        if fence_close != -1:
+            fence_inner = fence_inner[:fence_close]
+        try:
+            return json.loads(fence_inner.strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: slice from first '{' to last '}' and try.
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last > first:
+        try:
+            return json.loads(text[first : last + 1])
+        except json.JSONDecodeError:
+            pass
+
+    raise json.JSONDecodeError(
+        "no JSON object recoverable from LLM response", text, 0
+    )
 
 
 def _fallback_analysis(subject: str, sender: str) -> Analysis:
