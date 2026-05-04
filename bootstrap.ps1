@@ -107,7 +107,11 @@ Write-Host ""
 Write-Host "  3. Run the interactive setup wizard to fill in .env:" -ForegroundColor White
 Write-Host "       python main.py --setup" -ForegroundColor Yellow
 Write-Host "     Walks you through mailbox, company, email/LLM provider, notification" -ForegroundColor DarkGray
-Write-Host "     channels, and bid document capture (OneDrive / Google Drive)." -ForegroundColor DarkGray
+Write-Host "     channels, and bid document capture. The LLM picker offers OpenAI" -ForegroundColor DarkGray
+Write-Host "     (paid, fastest), GitHub Models (free), Ollama (free, local, private)," -ForegroundColor DarkGray
+Write-Host "     Azure OpenAI, or any OpenAI-compatible endpoint. If you pick Ollama" -ForegroundColor DarkGray
+Write-Host "     and don't have it installed, the wizard will offer to auto-install" -ForegroundColor DarkGray
+Write-Host "     it via winget and pull the model for you." -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  4. One-time email-provider sign-in (device code or browser):" -ForegroundColor White
 Write-Host "       python main.py --auth" -ForegroundColor Yellow

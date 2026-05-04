@@ -8,8 +8,12 @@ Run via: python main.py --setup
 from __future__ import annotations
 
 import getpass
+import os
 import re
+import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -140,6 +144,201 @@ def _validate_llm(provider: str, api_key: str, model: str, base_url: str = "",
         return False
 
 
+# ----------------------------- Ollama lifecycle -----------------------------
+# These let the wizard auto-install + start + pull a model when the user picks
+# Ollama, so they don't have to know anything about Ollama beforehand.
+
+_OLLAMA_API_BASE = "http://localhost:11434"
+
+
+def _ollama_installed() -> bool:
+    return shutil.which("ollama") is not None
+
+
+def _ollama_running(api_base: str = _OLLAMA_API_BASE) -> bool:
+    try:
+        import requests
+        r = requests.get(f"{api_base.rstrip('/')}/api/tags", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _refresh_windows_path() -> None:
+    """After winget install, refresh PATH from the registry so newly-installed
+    binaries become discoverable to this Python process."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return
+    extra = []
+    for root, key_path in (
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+    ):
+        try:
+            with winreg.OpenKey(root, key_path) as key:
+                val, _ = winreg.QueryValueEx(key, "Path")
+                if val:
+                    extra.append(val)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+    if extra:
+        os.environ["PATH"] = (os.environ.get("PATH", "") + os.pathsep
+                              + os.pathsep.join(extra))
+
+
+def _ollama_install_via_winget() -> bool:
+    """Run `winget install Ollama.Ollama`. Returns True on success."""
+    if sys.platform != "win32":
+        _warn("Auto-install only supported on Windows. Visit "
+              "https://ollama.com/download to install Ollama, then re-run the wizard.")
+        return False
+    if shutil.which("winget") is None:
+        _err("winget not found. Install Ollama manually from https://ollama.com/download.")
+        return False
+    _info("Installing Ollama via winget (a few minutes; ~200 MB download)...")
+    try:
+        proc = subprocess.run(
+            ["winget", "install", "Ollama.Ollama", "-e",
+             "--accept-source-agreements", "--accept-package-agreements", "--silent"],
+            check=False,
+        )
+    except Exception as e:
+        _err(f"winget install failed: {e}")
+        return False
+    if proc.returncode != 0:
+        _err(f"winget install returned exit code {proc.returncode}.")
+        return False
+    _refresh_windows_path()
+    return True
+
+
+def _ollama_start_server() -> bool:
+    """Start `ollama serve` detached in the background. Returns True if reachable."""
+    if not _ollama_installed():
+        return False
+    _info("Starting `ollama serve` in the background...")
+    creation_flags = 0
+    if sys.platform == "win32":
+        # Detach so the server keeps running after the wizard exits.
+        creation_flags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+        )
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+        )
+    except Exception as e:
+        _err(f"Could not launch `ollama serve`: {e}")
+        return False
+    # Wait up to 15s for the server to be reachable.
+    for _ in range(15):
+        time.sleep(1)
+        if _ollama_running():
+            return True
+    return False
+
+
+def _ollama_list_models() -> list[str]:
+    """Return the list of locally pulled model names, or [] if unknown."""
+    if not _ollama_installed():
+        return []
+    try:
+        proc = subprocess.run(
+            ["ollama", "list"], check=False, capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    return _parse_ollama_list(proc.stdout)
+
+
+def _parse_ollama_list(stdout: str) -> list[str]:
+    """Parse `ollama list` output. Header line is 'NAME ID SIZE MODIFIED'."""
+    out: list[str] = []
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        first = line.split()[0]
+        if first.upper() == "NAME":
+            continue
+        out.append(first)
+    return out
+
+
+def _ollama_model_pulled(model: str) -> bool:
+    return model in _ollama_list_models()
+
+
+def _ollama_pull_model(model: str) -> bool:
+    """Stream `ollama pull` so the user sees the download progress bar live."""
+    if not _ollama_installed():
+        return False
+    _info(f"Pulling Ollama model '{model}' (can take several minutes)...")
+    try:
+        proc = subprocess.run(["ollama", "pull", model], check=False)
+    except Exception as e:
+        _err(f"`ollama pull {model}` failed: {e}")
+        return False
+    if proc.returncode != 0:
+        _err(f"`ollama pull {model}` exited with code {proc.returncode}.")
+        return False
+    return True
+
+
+def _ollama_ensure_ready(model: str) -> bool:
+    """End-to-end: install Ollama if missing, start the server, pull the model.
+    Returns True only if the agent can immediately use Ollama afterwards.
+    Each step is gated on user confirmation so the wizard never silently
+    installs system software."""
+    if not _ollama_installed():
+        _info("\nOllama is not installed on this machine.")
+        if not _ask_yes_no("Auto-install Ollama via winget now?", default=True):
+            _warn("Skipping. Install manually from https://ollama.com/download "
+                  "and re-run the wizard.")
+            return False
+        if not _ollama_install_via_winget():
+            return False
+        if not _ollama_installed():
+            _err("winget completed but `ollama` is still not on PATH. "
+                 "Open a new terminal and re-run the wizard.")
+            return False
+        _ok("Ollama installed.")
+
+    if not _ollama_running():
+        _info("\nOllama server isn't running.")
+        if not _ask_yes_no("Start `ollama serve` in the background?", default=True):
+            _warn("Skipping. Start it manually with: ollama serve")
+            return False
+        if not _ollama_start_server():
+            _warn("Could not auto-start. Open another terminal and run: ollama serve")
+            return False
+        _ok("Ollama server reachable.")
+
+    if not _ollama_model_pulled(model):
+        _info(f"\nModel '{model}' is not yet pulled locally.")
+        if not _ask_yes_no(f"Pull '{model}' now?", default=True):
+            _warn(f"Skipping. Pull manually with: ollama pull {model}")
+            return False
+        if not _ollama_pull_model(model):
+            return False
+        _ok(f"Model '{model}' ready.")
+
+    return True
+
+
 def _validate_twilio(sid: str, token: str) -> bool:
     try:
         from twilio.rest import Client
@@ -264,13 +463,27 @@ def run_wizard() -> int:
     # ---------- LLM (pluggable) ----------
     _h2("3/6  LLM provider (the brain that analyzes emails)")
     print()
-    print("    [1] OpenAI            (paid, ~$0.0001/email; needs https://platform.openai.com key)")
-    print("    [2] GitHub Models     (FREE; needs a GitHub PAT at https://github.com/settings/tokens)")
-    print("    [3] Ollama (local)    (FREE; needs `ollama serve` running locally)")
-    print("    [4] Azure OpenAI      (work account; needs your Azure deployment URL)")
-    print("    [5] OpenAI-compatible (LM Studio, vLLM, etc.; you provide base_url)")
+    print("    [1] OpenAI            PAID, fastest, best accuracy. Email content")
+    print("                          is sent to OpenAI. Cost: ~$0.0001/email with")
+    print("                          gpt-4o-mini. Needs an API key from")
+    print("                          https://platform.openai.com/api-keys")
     print()
-    pick = _ask("Pick a provider", default="1").strip()
+    print("    [2] GitHub Models     FREE with daily quota. Needs a GitHub PAT")
+    print("                          (no scopes required) from")
+    print("                          https://github.com/settings/tokens")
+    print()
+    print("    [3] Ollama (local)    FREE, fully private. Email content NEVER")
+    print("                          leaves your laptop. Slower (~10s/email).")
+    print("                          The wizard will auto-install Ollama and")
+    print("                          pull the chosen model if needed.")
+    print()
+    print("    [4] Azure OpenAI      Your work Azure subscription. Needs your")
+    print("                          deployment endpoint URL.")
+    print()
+    print("    [5] OpenAI-compatible Any LM Studio / vLLM / llama.cpp endpoint.")
+    print("                          You provide the base_url.")
+    print()
+    pick = _ask("Pick a provider [1-5]", default="1").strip()
     provider_map = {
         "1": "openai", "2": "github_models", "3": "ollama",
         "4": "azure_openai", "5": "openai_compat",
@@ -316,6 +529,10 @@ def run_wizard() -> int:
             "Model name (for Azure: deployment name)",
             default=default_models.get(provider, "gpt-4o-mini"),
         )
+
+        if provider == "ollama":
+            if not _ollama_ensure_ready(model):
+                _warn("Ollama isn't fully ready. Validation will likely fail.")
 
         if _validate_llm(provider, api_key, model, base_url, azure_endpoint, azure_version):
             break

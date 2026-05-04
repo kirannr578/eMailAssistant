@@ -111,8 +111,13 @@ channel**. Free options exist in every category:
 | **OpenAI** (default) | ~$0.0001/email | <https://platform.openai.com/api-keys> + add $5 credit |
 | **GitHub Models** | **FREE** with daily quota | <https://github.com/settings/tokens> -> create fine-grained PAT (no scopes needed) |
 | **Azure OpenAI** | Your Azure billing | Use your existing deployment |
-| **Ollama (local)** | **FREE**, runs on your laptop | `winget install Ollama.Ollama` then `ollama pull llama3.1:8b` |
+| **Ollama (local)** | **FREE**, runs on your laptop, fully private | The wizard auto-installs Ollama via `winget` and pulls the model for you when you pick option [3]. No prep needed. |
 | **OpenAI-compatible** | Varies | Any LM Studio / vLLM / llama.cpp endpoint |
+
+You're not locked in - to switch providers later, just edit `LLM_PROVIDER`,
+`LLM_API_KEY`, `LLM_MODEL`, and `LLM_BASE_URL` in `.env` and restart the
+agent. Common pattern: start with OpenAI for accuracy, switch to Ollama
+later for privacy or to go offline.
 
 #### Notification channel (pick one or more)
 | Channel | Cost | Setup |
