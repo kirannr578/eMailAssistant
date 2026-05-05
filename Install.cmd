@@ -60,10 +60,22 @@ echo.
 echo ======================================================================
 echo  STEP 1 of 6 - Installing Python and dependencies
 echo ======================================================================
+echo This step needs Python 3.11+. If your laptop doesn't have it,
+echo bootstrap.ps1 will try to install it via winget, then via python.org
+echo as a fallback. If both fail, you have two options:
+echo.
+echo   1. Install Python manually from https://python.org (tick "Add to PATH")
+echo      and re-run this Install.cmd.
+echo   2. Use EmailAssistantSetup.exe (in dist\) instead - it bundles its
+echo      own Python and doesn't need this step at all.
+echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\bootstrap.ps1"
 if errorlevel 1 (
     echo.
     echo bootstrap.ps1 failed. See the error above.
+    echo.
+    echo Quickest path forward: use EmailAssistantSetup.exe (in dist\) which
+    echo doesn't need Python on this laptop at all.
     goto :failed
 )
 

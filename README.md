@@ -300,6 +300,58 @@ Build a new `EmailAssistantSetup.exe` with a bumped version (edit
 Setup detects the existing install via `AppId` and upgrades in place. The
 data folder (`%LOCALAPPDATA%\EmailAssistant\`) is untouched.
 
+### Where to look when something goes wrong
+
+The agent now persists structured logs and crash dumps to disk so you don't
+need to keep a console window open to debug failures.
+
+| Path | What it contains |
+|------|------------------|
+| `%LOCALAPPDATA%\EmailAssistant\logs\agent.log` | Rolling info-level log of every poll cycle, LLM call, calendar/notification action. Rotates at 5 MB, keeps 5 backups (~25 MB cap). |
+| `%LOCALAPPDATA%\EmailAssistant\logs\crash_<timestamp>_<pid>.txt` | Full Python traceback for any UNCAUGHT exception (incl. import-time crashes from missing PyInstaller hidden imports). Keeps the 20 most recent. |
+| `%TEMP%\Setup Log YYYY-MM-DD #NNN.txt` | Inno Setup install transcript - written every time the installer runs, success or fail. |
+
+The Start Menu group has a **View Logs** shortcut that opens
+`%LOCALAPPDATA%\EmailAssistant\logs\` directly so you can grab files for a
+bug report without typing the path.
+
+To override the data dir (for a portable install, multiple mailboxes on one
+laptop, or testing), set `EMAIL_ASSISTANT_DATA_DIR` before launching.
+
+### Troubleshooting: installer is blocked by Windows
+
+The unsigned `EmailAssistantSetup.exe` will trip Windows defenses. Symptoms
+and fixes:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Blue popup: "Windows protected your PC" | Microsoft Defender SmartScreen | Click **More info** -> **Run anyway**. One-time per file. |
+| "Security policy" / "Your administrator has blocked this app" / nothing happens on double-click | **Smart App Control** (Win 11) or AppLocker policy | See "Smart App Control" below. |
+| File silently disappears after download or after Inno Setup extracts | Microsoft Defender / corporate AV quarantine | Add an exclusion for `%LOCALAPPDATA%\Programs\EmailAssistant` (Settings -> Privacy & security -> Windows Security -> Virus & threat protection -> Manage settings -> Exclusions). |
+| Yellow MOTW warning: "The publisher could not be verified" | File downloaded from internet (Mark of the Web) | Right-click the .exe -> **Properties** -> tick **Unblock** -> OK -> then double-click. |
+
+#### Smart App Control (Win 11 24H2+)
+
+Smart App Control silently blocks unsigned .exe files - you may not even see
+a notification. To check whether it's the culprit:
+
+```powershell
+Get-MpComputerStatus | Select-Object SmartAppControlState
+```
+
+Possible values: `On`, `Off`, `Eval`. If `On` or `Eval`, your options are:
+
+1. **Recommended for personal use:** turn it Off in Settings -> Privacy &
+   security -> Windows Security -> App & browser control -> Smart App
+   Control. Note that **once turned off, you cannot turn it back on without
+   reinstalling Windows.** That's a Microsoft design choice.
+2. **Recommended if you want to keep it on:** code-sign the installer (see
+   the next section).
+3. **Workaround:** copy the project source to the target machine and run
+   `bootstrap.ps1` + `python main.py --setup` instead of using the bundled
+   installer. Smart App Control only blocks .exe files; running Python
+   scripts directly is fine.
+
 ### Caveats
 
 - **No code signing.** Windows SmartScreen + corporate AV may flag the unsigned

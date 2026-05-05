@@ -25,6 +25,9 @@ block_cipher = None
 # the provider modules aren't picked up by static analysis. List them
 # explicitly. setup_wizard is also lazy-loaded under --setup.
 hiddenimports = [
+    # Crash handler + path resolver must always be in the bundle.
+    "_crash",
+    "app_paths",
     # Provider stack (lazy in main.py)
     "providers",
     "providers.base",
@@ -45,9 +48,12 @@ hiddenimports = [
     "dateutil",
     "dateutil.parser",
     "dateutil.tz",
-    # Pydantic v2 - sometimes needs explicit hooks
+    # Pydantic v2 - PyInstaller usually finds these but list them
+    # explicitly so a CI build can't silently strip the Rust core.
     "pydantic",
     "pydantic.deprecated.decorator",
+    "pydantic_core",
+    "pydantic_core._pydantic_core",
 ]
 
 # google-api-python-client uses dynamic discovery; pull in everything.
@@ -97,7 +103,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=["runtime_hook.py"],
     excludes=[
         # Tests + dev-only deps - exclude to keep the bundle small.
         "pytest",

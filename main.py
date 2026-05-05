@@ -50,6 +50,14 @@ def _pin_data_dir_when_frozen() -> None:
 
 _pin_data_dir_when_frozen()
 
+# Install the crash sentinel as early as possible. In frozen builds the
+# PyInstaller runtime hook already did this BEFORE we got here, but the
+# install() call is idempotent so calling it again from dev mode is
+# safe and ensures both modes behave identically.
+import _crash  # noqa: E402
+
+_crash.install()
+
 from analyzer import (
     Analysis,
     EmailAnalyzer,
@@ -76,12 +84,51 @@ logger = logging.getLogger("email_assistant")
 
 
 def _setup_logging(debug: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    """Configure console + rotating-file logging.
+
+    File logs land in ./logs/agent.log relative to CWD. In frozen mode CWD
+    is pinned to %LOCALAPPDATA%\\EmailAssistant by _pin_data_dir_when_frozen,
+    so the effective path is %LOCALAPPDATA%\\EmailAssistant\\logs\\agent.log.
+    Both console + file handlers are added to the root logger so EVERY
+    module's logger inherits both sinks.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    level = logging.DEBUG if debug else logging.INFO
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    # Quiet noisy third-party loggers.
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    # Wipe any handlers configured by basicConfig in earlier code paths,
+    # otherwise we'd double-log when --setup -> wizard -> daemon flips
+    # through multiple init points.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    console = logging.StreamHandler()
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    try:
+        log_dir = Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        # 5 MB per file, keep 5 rotations = 25 MB cap.
+        file_handler = RotatingFileHandler(
+            log_dir / "agent.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
+    except Exception as e:
+        # Never let logging setup itself crash the agent. Keep going with
+        # console-only and surface the reason there.
+        root.warning("File logging disabled: %s", e)
+
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("msal").setLevel(logging.WARNING)
 
@@ -585,6 +632,94 @@ def run_forever(settings: Settings) -> None:
     logger.info("Email Assistant stopped.")
 
 
+def _run_diagnostics() -> int:
+    """Print install paths, versions, and a tail of the most recent log.
+
+    Designed for unattended debugging: also writes the same report to a
+    timestamped file in logs/ so the user can paste it in a bug report.
+    Always exits 0 (the diagnostic itself succeeded; the issues it
+    reports are surfaced inline).
+    """
+    import datetime as _dt
+    import platform as _plat
+
+    import app_paths
+
+    diag = app_paths.diagnostics()
+
+    lines: list[str] = []
+    lines.append("=" * 72)
+    lines.append("Email Assistant - diagnostic report")
+    lines.append("=" * 72)
+    lines.append(f"Generated:  {_dt.datetime.now().isoformat()}")
+    lines.append(f"Platform:   {_plat.platform()}")
+    lines.append("")
+    lines.append("--- Paths ---")
+    for k, v in diag.items():
+        if k == "env_overrides":
+            lines.append("env_overrides:")
+            for ek, ev in v.items():
+                # Truncate PATH which is huge.
+                if ek == "PATH" and len(ev) > 200:
+                    ev = ev[:200] + "..."
+                lines.append(f"  {ek} = {ev}")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("")
+    lines.append("--- Critical files ---")
+    for relname in (".env", ".env.example", "state.db", "token_cache.bin",
+                    "google_token.json", "client_secret.json"):
+        for base, label in (
+            (app_paths.data_dir(), "data"),
+            (app_paths.bundle_dir(), "bundle"),
+        ):
+            p = base / relname
+            if p.exists():
+                size = p.stat().st_size
+                lines.append(f"  [{label:6s}] {p} ({size} bytes)")
+    lines.append("")
+    lines.append("--- Recent crashes ---")
+    crash_dir = app_paths.data_dir() / "logs"
+    if crash_dir.exists():
+        crashes = sorted(crash_dir.glob("crash_*.txt"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+        if crashes:
+            for c in crashes:
+                lines.append(f"  {c}  ({_dt.datetime.fromtimestamp(c.stat().st_mtime).isoformat()})")
+        else:
+            lines.append("  (none)")
+    else:
+        lines.append("  (logs dir does not exist yet)")
+    lines.append("")
+    lines.append("--- Recent agent.log tail (last 40 lines) ---")
+    log_file = app_paths.data_dir() / "logs" / "agent.log"
+    if log_file.exists():
+        try:
+            tail = log_file.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+            lines.extend(tail)
+        except Exception as e:
+            lines.append(f"  (could not read agent.log: {e})")
+    else:
+        lines.append("  (no agent.log yet - agent has not run successfully)")
+    lines.append("")
+
+    report = "\n".join(lines)
+    print(report)
+
+    # Also persist for paste-into-bug-report.
+    try:
+        d = app_paths.ensure_data_dir() / "logs"
+        d.mkdir(parents=True, exist_ok=True)
+        ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = d / f"diagnose_{ts}.txt"
+        out.write_text(report, encoding="utf-8")
+        print(f"\nReport saved to: {out}")
+    except Exception:
+        pass
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Email Assistant agent")
     parser.add_argument("--once", action="store_true",
@@ -593,19 +728,32 @@ def main() -> int:
                         help="Run device-code OAuth flow to seed the token cache, then exit.")
     parser.add_argument("--setup", action="store_true",
                         help="Run the interactive .env setup wizard and exit.")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Print install paths, versions, and recent logs; exit. "
+                             "Use this when reporting a bug.")
     args = parser.parse_args()
 
+    if args.diagnose:
+        return _run_diagnostics()
+
     if args.setup:
+        # Init logging so any wizard crash also lands in logs/agent.log,
+        # not only in the crash file. The wizard itself uses print() for
+        # interactive output, but its call sites (validators, network
+        # calls) use the standard logging module.
+        _setup_logging(debug=False)
         from setup_wizard import run_wizard
         return run_wizard()
+
+    # Init logging EARLY (before load_settings) so config-load failures
+    # are persisted to logs/agent.log, not just dumped to a console
+    # window that vanishes when Task Scheduler exits.
+    _setup_logging(debug=False)
 
     try:
         settings = load_settings()
     except RuntimeError as e:
-        # Friendly error for missing/invalid .env. Most common cause: user
-        # double-clicked the daemon shortcut before running the Setup Wizard.
-        # Print a clean message instead of the raw Python traceback (which
-        # PyInstaller wraps with [PYI-...:ERROR] noise on stderr).
+        logger.error("Configuration error: %s", e)
         sys.stderr.write(
             "\n"
             "Email Assistant cannot start: configuration is missing or incomplete.\n"
@@ -615,8 +763,10 @@ def main() -> int:
             "     or:  EmailAssistant.exe --setup).\n"
             "  2. Then sign in:  EmailAssistant.exe --auth\n"
             "  3. Then re-run this command.\n\n"
+            f"A full log is at: {(Path('logs') / 'agent.log').resolve()}\n\n"
         )
         return 2
+    # Re-init at the right level once we know the user's debug preference.
     _setup_logging(settings.debug)
 
     if args.auth:

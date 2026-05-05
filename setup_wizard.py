@@ -20,6 +20,8 @@ import sys
 import time
 from pathlib import Path
 
+from app_paths import bundle_dir, data_dir, ensure_data_dir, find_resource, is_frozen
+
 
 def _detect_local_timezone() -> str:
     """Best-effort IANA timezone detection. Falls back to UTC if unknown."""
@@ -38,8 +40,23 @@ def _detect_local_timezone() -> str:
             pass
         return "UTC"
 
-ENV_TEMPLATE_PATH = Path(".env.example")
-ENV_PATH = Path(".env")
+def _resolve_env_template() -> Path:
+    """Find .env.example. In frozen mode it ships in the install dir, but a
+    user-edited copy in the data dir takes precedence. In dev mode it sits
+    next to setup_wizard.py."""
+    p = find_resource(".env.example")
+    if p is not None:
+        return p
+    # Last-resort fallback: relative path. _read_template raises a clear
+    # error if this doesn't exist.
+    return Path(".env.example")
+
+
+# Always write .env to the data dir. In dev mode this is the project
+# root (current working directory); in frozen mode it's
+# %LOCALAPPDATA%\EmailAssistant.
+ENV_TEMPLATE_PATH = _resolve_env_template()
+ENV_PATH = data_dir() / ".env"
 
 
 # ----------------------------- printing helpers -----------------------------
@@ -399,8 +416,26 @@ def _write_env(values: dict[str, str]) -> None:
 def run_wizard() -> int:
     _h1("Email Assistant - interactive setup")
 
+    # Make sure the data dir exists and tell the user where it is. This is
+    # especially useful for users running the frozen Setup Wizard shortcut:
+    # it's the only place they'll learn that .env, state.db, tokens, and
+    # (Gmail users) client_secret.json live there.
+    dd = ensure_data_dir()
+    print()
+    _info(f"Configuration directory:  {dd}")
+    _info(f"This is where .env, state.db, OAuth tokens, and logs/ will live.")
+    if is_frozen():
+        _info("Gmail users: place your OAuth client_secret.json file in that")
+        _info("folder before continuing (or paste an absolute path when asked).")
+
+    if not ENV_TEMPLATE_PATH.exists():
+        _err(f"Template not found at {ENV_TEMPLATE_PATH}.")
+        _err("This usually means the install bundle is incomplete - try")
+        _err("reinstalling EmailAssistantSetup.exe.")
+        return 1
+
     if ENV_PATH.exists():
-        if not _ask_yes_no(".env already exists. Overwrite?", default=False):
+        if not _ask_yes_no(f".env already exists at {ENV_PATH}. Overwrite?", default=False):
             _info("Aborted. Existing .env left untouched.")
             return 1
 
@@ -450,15 +485,42 @@ def run_wizard() -> int:
     else:
         _info("See README section 'Gmail / Google Workspace setup' for the Google Cloud Console steps.")
         _info("You should have downloaded an OAuth client JSON named something like client_secret_XXX.json.")
+        if is_frozen():
+            _info(f"Tip: drop the file into {data_dir()} and answer with just the filename,")
+            _info("or paste a full absolute path from anywhere on disk.")
         while True:
-            path = _ask(
-                "GOOGLE_CLIENT_SECRETS_PATH (path to the OAuth client JSON)",
+            raw = _ask(
+                "GOOGLE_CLIENT_SECRETS_PATH (filename in data dir, or absolute path)",
                 default=values.get("GOOGLE_CLIENT_SECRETS_PATH", "client_secret.json"),
             )
-            if Path(path).exists():
-                values["GOOGLE_CLIENT_SECRETS_PATH"] = path
-                break
-            _err(f"File not found: {path}")
+            # Resolve in this order: as-given (handles absolute paths and
+            # relative-to-cwd), then relative to the data dir.
+            candidate_paths = [Path(raw), data_dir() / raw]
+            found = next((p for p in candidate_paths if p.exists()), None)
+            if found is None:
+                _err(f"File not found. Tried: {[str(p) for p in candidate_paths]}")
+                continue
+            # If user gave an external path, offer to copy it into the data
+            # dir so reinstalls/migrations don't break the agent.
+            if is_frozen() and found.resolve().parent != data_dir().resolve():
+                if _ask_yes_no(
+                    f"Copy {found.name} into {data_dir()} so it survives uninstalls?",
+                    default=True,
+                ):
+                    target = data_dir() / found.name
+                    try:
+                        shutil.copyfile(found, target)
+                        _ok(f"Copied to {target}")
+                        found = target
+                    except Exception as e:
+                        _warn(f"Copy failed ({e}); using original path.")
+            # Store as a relative filename when it's in the data dir, so
+            # the .env stays portable across machines / data dirs.
+            if found.resolve().parent == data_dir().resolve():
+                values["GOOGLE_CLIENT_SECRETS_PATH"] = found.name
+            else:
+                values["GOOGLE_CLIENT_SECRETS_PATH"] = str(found)
+            break
         values["GOOGLE_CALENDAR_ID"] = _ask(
             "GOOGLE_CALENDAR_ID ('primary' = your main calendar)",
             default=values.get("GOOGLE_CALENDAR_ID", "primary"),

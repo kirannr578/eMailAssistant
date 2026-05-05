@@ -46,6 +46,10 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 UsePreviousAppDir=yes
+; Always write an install log to %TEMP%. Inno Setup auto-names it like
+; Setup Log YYYY-MM-DD #NNN.txt. If the user's install errors out, ask
+; them to send that file - it has the full step-by-step transcript.
+SetupLogging=yes
 ; Set this to a path under installer\ once you have an icon:
 ; SetupIconFile=app.ico
 LicenseFile=
@@ -66,12 +70,19 @@ Name: "desktopicon"; Description: "Create a Desktop shortcut for the Setup Wizar
 Source: "..\dist\EmailAssistant\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Helper PowerShell script for the Scheduled Task action on the Finish page.
 Source: "..\scripts\install_task.ps1"; DestDir: "{app}\scripts"; Flags: ignoreversion
+; Drop a fresh copy of .env.example into the user data dir so the Setup
+; Wizard always has a template to load from. `onlyifdoesntexist` so a
+; user-edited template survives reinstalls.
+Source: "..\.env.example"; DestDir: "{localappdata}\EmailAssistant"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Dirs]
 ; Per-user data folder. Inno marks it 'uninsneveruninstall' so an
 ; uninstall cleanly removes the program but preserves your .env,
 ; state.db, and OAuth tokens. A reinstall picks them up.
 Name: "{localappdata}\EmailAssistant"; Flags: uninsneveruninstall
+; Pre-create the logs subdir so the "View Logs" shortcut works even
+; before the agent has been launched for the first time.
+Name: "{localappdata}\EmailAssistant\logs"; Flags: uninsneveruninstall
 
 [Icons]
 Name: "{group}\Email Assistant (Run continuously)"; \
@@ -104,6 +115,11 @@ Name: "{group}\Email Assistant - Run Once (smoke test)"; \
 Name: "{group}\Open Data Folder"; \
     Filename: "{localappdata}\EmailAssistant"; \
     Comment: "Open the folder containing .env, state.db, and tokens"; \
+    Tasks: startmenuicon
+
+Name: "{group}\View Logs"; \
+    Filename: "{localappdata}\EmailAssistant\logs"; \
+    Comment: "Open the folder containing agent.log and any crash dumps"; \
     Tasks: startmenuicon
 
 Name: "{group}\Uninstall {#AppName}"; \

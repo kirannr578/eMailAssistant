@@ -27,36 +27,101 @@ if ($policy -eq "Restricted" -or $policy -eq "Undefined") {
 # -------------------------------------------------------------------
 # 1. Ensure Python 3.11+ is installed.
 # -------------------------------------------------------------------
+function Test-IsWindowsStoreStub {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    # The Store alias / App Execution Alias stubs live under WindowsApps.
+    # Running them prints "Python was not found; run without arguments to
+    # install from the Microsoft Store..." and returns exit 9009.
+    if ($Path -match '\\WindowsApps\\') { return $true }
+    return $false
+}
+
 function Get-PythonExe {
-    foreach ($candidate in @("python", "py")) {
+    foreach ($candidate in @("python", "python3", "py")) {
         $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-        if ($cmd) {
-            $verOutput = & $candidate --version 2>&1
-            if ($LASTEXITCODE -eq 0 -and $verOutput -match "Python (\d+)\.(\d+)") {
-                $major = [int]$matches[1]; $minor = [int]$matches[2]
-                if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
-                    return $cmd.Source
-                }
+        if (-not $cmd) { continue }
+        if (Test-IsWindowsStoreStub -Path $cmd.Source) {
+            Write-Warn2 "Ignoring Microsoft Store stub at $($cmd.Source)"
+            continue
+        }
+        $verOutput = & $cmd.Source --version 2>&1
+        if ($LASTEXITCODE -eq 0 -and $verOutput -match "Python (\d+)\.(\d+)") {
+            $major = [int]$matches[1]; $minor = [int]$matches[2]
+            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
+                return $cmd.Source
             }
         }
     }
     return $null
 }
 
+function Install-PythonViaWinget {
+    Write-Warn2 "Python 3.11+ not found. Attempting winget install of Python 3.12..."
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-Warn2 "winget not available on this machine."
+        return $false
+    }
+    winget install --id Python.Python.3.12 -e `
+        --accept-source-agreements --accept-package-agreements `
+        --silent --scope user
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Install-PythonFromPythonOrg {
+    Write-Warn2 "Falling back to direct download from python.org..."
+    $url = "https://www.python.org/ftp/python/3.12.7/python-3.12.7-amd64.exe"
+    $dst = Join-Path $env:TEMP "python-3.12.7-amd64.exe"
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $dst -UseBasicParsing
+    } catch {
+        Write-Warn2 "Download failed: $($_.Exception.Message)"
+        return $false
+    }
+    # Per-user, silent, no UI. Adds Python to user PATH.
+    $args = @(
+        "/quiet",
+        "InstallAllUsers=0",
+        "PrependPath=1",
+        "Include_launcher=1",
+        "Include_test=0",
+        "Include_doc=0"
+    )
+    $proc = Start-Process -FilePath $dst -ArgumentList $args -Wait -PassThru
+    return ($proc.ExitCode -eq 0)
+}
+
 Write-Step "Checking for Python 3.11+"
 $python = Get-PythonExe
 if (-not $python) {
-    Write-Warn2 "Python 3.11+ not found. Installing Python 3.12 via winget..."
-    winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements --silent
-    if ($LASTEXITCODE -ne 0) {
-        throw "winget failed to install Python. Install manually from https://python.org and re-run."
+    $installed = Install-PythonViaWinget
+    if (-not $installed) { $installed = Install-PythonFromPythonOrg }
+    if (-not $installed) {
+        throw @"
+Could not auto-install Python.
+
+Manual fix:
+  1. Open https://www.python.org/downloads/ in a browser.
+  2. Download the Windows installer (3.12 or newer).
+  3. Run it. CHECK the box 'Add python.exe to PATH' on the first screen.
+  4. Open a NEW PowerShell window and re-run .\bootstrap.ps1.
+
+If you only want to use Email Assistant (not develop on it), you don't need
+Python at all - download EmailAssistantSetup.exe instead and double-click it.
+"@
     }
-    # winget updates PATH for new processes only; refresh THIS session's PATH from the registry.
+    # winget / installer updated PATH for new processes only. Refresh
+    # THIS session's PATH from the registry so we can re-detect.
     $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
                 [System.Environment]::GetEnvironmentVariable("Path", "User")
     $python = Get-PythonExe
     if (-not $python) {
-        throw "Python install reported success but 'python' still not on PATH. Open a NEW PowerShell window and re-run .\bootstrap.ps1."
+        throw @"
+Python install completed but 'python' is still not on PATH in THIS shell.
+Close this PowerShell window, open a new one, and re-run .\bootstrap.ps1.
+The new session will pick up the freshly-installed Python.
+"@
     }
 }
 Write-Ok "Found Python at: $python"
