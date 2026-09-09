@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import os
 import re
@@ -193,3 +194,26 @@ def load_report(path: Path) -> list[AuditRow]:
             ))
     rows.sort(key=lambda r: r.total_bytes, reverse=True)
     return rows
+
+
+def load_logged_message_ids(
+    output_dir: Path,
+    *,
+    statuses: frozenset[str],
+) -> set[str]:
+    """Return message IDs already recorded in archive_log_*.jsonl with given statuses."""
+    ids: set[str] = set()
+    if not output_dir.is_dir():
+        return ids
+    for log_file in sorted(output_dir.glob("archive_log_*.jsonl")):
+        try:
+            for line in log_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                if record.get("status") in statuses and record.get("message_id"):
+                    ids.add(str(record["message_id"]))
+        except Exception as e:
+            logger.warning("Could not read archive log %s: %s", log_file, e)
+    return ids

@@ -31,6 +31,7 @@ import tls_setup  # noqa: E402, F401
 from gmail_storage_common import (  # noqa: E402
     AuditRow,
     load_google_client,
+    load_logged_message_ids,
     load_report,
     sanitize_sender_folder,
     scan_large_attachments,
@@ -310,6 +311,8 @@ def _build_args() -> argparse.Namespace:
                    help="Required with --execute (safety gate)")
     p.add_argument("--output-dir", type=Path, default=Path("reports"),
                    help="Directory for archive log (default: reports/)")
+    p.add_argument("--repreview", action="store_true",
+                   help="Include messages already logged as dry-run (default: skip them)")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
@@ -368,6 +371,20 @@ def main() -> int:
     targets = expand_targets(rows, all_attachments=args.all_attachments)
     if not targets:
         print("No eligible messages to archive.")
+        return 0
+
+    skip_statuses: set[str] = {"archived"}
+    if dry_run and not args.repreview:
+        skip_statuses.add("dry_run")
+    already_done = load_logged_message_ids(args.output_dir, statuses=frozenset(skip_statuses))
+    if already_done:
+        before = len({t.message_id for t in targets})
+        targets = [t for t in targets if t.message_id not in already_done]
+        after = len({t.message_id for t in targets})
+        print(f"Skipping {before - after} message(s) already in archive log ({', '.join(sorted(skip_statuses))}).")
+
+    if not targets:
+        print("All messages in this report were already processed. Nothing left to do.")
         return 0
 
     mode = "DRY-RUN" if dry_run else "EXECUTE"

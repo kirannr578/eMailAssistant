@@ -64,6 +64,23 @@ class TestReportRoundTrip:
         assert loaded[0].total_bytes == 10_000_000
 
 
+class TestArchiveLogSkip:
+    def test_load_logged_message_ids(self, tmp_path: Path):
+        from tools.gmail_storage_common import load_logged_message_ids
+
+        log = tmp_path / "archive_log_20260908.jsonl"
+        log.write_text(
+            '{"status":"archived","message_id":"m1"}\n'
+            '{"status":"dry_run","message_id":"m2"}\n'
+            '{"status":"upload_failed","message_id":"m3"}\n',
+            encoding="utf-8",
+        )
+        archived = load_logged_message_ids(tmp_path, statuses=frozenset({"archived"}))
+        assert archived == {"m1"}
+        both = load_logged_message_ids(tmp_path, statuses=frozenset({"archived", "dry_run"}))
+        assert both == {"m1", "m2"}
+
+
 class TestScanLargeAttachments:
     def test_filters_by_min_size(self):
         client = MagicMock()
