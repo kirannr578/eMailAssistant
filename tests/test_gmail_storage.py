@@ -122,6 +122,26 @@ class TestGmailClientExtensions:
         trash.assert_called_once_with(userId="me", id="msg123")
 
 
+class TestLocalOneDrive:
+    def test_detect_from_env(self, monkeypatch, tmp_path: Path):
+        from providers.local_onedrive import detect_onedrive_root
+
+        monkeypatch.setenv("OneDrive", str(tmp_path))
+        assert detect_onedrive_root() == tmp_path
+
+    def test_upload_creates_file(self, tmp_path: Path):
+        from providers.local_onedrive import LocalOneDriveStorage
+
+        storage = LocalOneDriveStorage(tmp_path)
+        path = storage.upload(
+            folder_path="Email Assistant/Gmail Archive/2024/sender",
+            filename="doc.pdf",
+            content=b"hello",
+        )
+        assert Path(path).exists()
+        assert Path(path).read_bytes() == b"hello"
+
+
 class TestArchiveExpandTargets:
     def test_skips_multi_attachment_by_default(self):
         from tools.archive_to_onedrive import expand_targets

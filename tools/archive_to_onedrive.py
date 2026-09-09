@@ -2,6 +2,9 @@
 
 Dry-run by default. Use --execute --confirm to perform uploads and trash.
 
+By default uses the local OneDrive sync folder when the desktop app is installed
+(no Microsoft Graph / MS_CLIENT_ID required). Pass --graph-api to use the API instead.
+
 Usage:
     python tools/archive_to_onedrive.py --from-report reports/gmail_storage_20260909.csv --limit 20
     python tools/archive_to_onedrive.py --from-report reports/gmail_storage_20260909.csv --execute --confirm --limit 20
@@ -16,6 +19,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol
 
 _root = Path(__file__).resolve().parent.parent
 _tools = Path(__file__).resolve().parent
@@ -31,11 +35,22 @@ from gmail_storage_common import (  # noqa: E402
     sanitize_sender_folder,
     scan_large_attachments,
 )
-from providers.ms_graph_auth import GraphAuth  # noqa: E402
 from providers.gmail import GmailClient  # noqa: E402
+from providers.local_onedrive import LocalOneDriveStorage, detect_onedrive_root  # noqa: E402
 from providers.onedrive import OneDriveClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+class ArchiveStorage(Protocol):
+    def upload(
+        self,
+        *,
+        folder_path: str,
+        filename: str,
+        content: bytes,
+        content_type: str | None = None,
+    ) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -50,15 +65,16 @@ class AttachmentTarget:
     web_link: str
 
 
-def _load_onedrive_client() -> OneDriveClient:
+def _load_graph_onedrive() -> OneDriveClient:
     from dotenv import load_dotenv
+    from providers.ms_graph_auth import GraphAuth
 
     load_dotenv()
     client_id = os.getenv("MS_CLIENT_ID", "").strip()
     if not client_id:
         raise RuntimeError(
-            "MS_CLIENT_ID is required for OneDrive upload. "
-            "Run scripts/setup_entra.ps1 or set it in .env."
+            "MS_CLIENT_ID is required for --graph-api. "
+            "Run scripts/setup_entra.ps1 or use local OneDrive (default)."
         )
     auth = GraphAuth(
         client_id=client_id,
@@ -66,6 +82,35 @@ def _load_onedrive_client() -> OneDriveClient:
         token_cache_path=Path(os.getenv("MS_TOKEN_CACHE_PATH", "token_cache.bin")),
     )
     return OneDriveClient(auth)
+
+
+def resolve_storage(*, use_graph: bool, use_local: bool) -> tuple[str, ArchiveStorage]:
+    """Pick Graph API or local OneDrive sync folder."""
+    if use_graph:
+        return "graph-api", _load_graph_onedrive()
+
+    if use_local or not use_graph:
+        root = detect_onedrive_root()
+        if root is not None:
+            return "local-sync", LocalOneDriveStorage(root)
+
+    if not use_local:
+        client_id = os.getenv("MS_CLIENT_ID", "").strip()
+        token = Path(os.getenv("MS_TOKEN_CACHE_PATH", "token_cache.bin"))
+        if client_id and token.exists():
+            try:
+                return "graph-api", _load_graph_onedrive()
+            except Exception as e:
+                logger.warning("Graph OneDrive unavailable (%s); trying local folder.", e)
+
+    root = detect_onedrive_root()
+    if root is not None:
+        return "local-sync", LocalOneDriveStorage(root)
+
+    raise RuntimeError(
+        "No OneDrive destination found. Install/sign in to OneDrive desktop, or set "
+        "GMAIL_ARCHIVE_LOCAL_ROOT in .env, or configure MS_CLIENT_ID for Graph API."
+    )
 
 
 def _archive_base_folder() -> str:
@@ -115,6 +160,13 @@ def _onedrive_folder(target: AttachmentTarget, base_folder: str) -> str:
     return f"{base_folder}/{year}/{sender}"
 
 
+def _display_dest(storage_mode: str, storage: ArchiveStorage, folder: str, filename: str) -> str:
+    if storage_mode == "local-sync" and isinstance(storage, LocalOneDriveStorage):
+        rel = folder.replace("/", os.sep)
+        return str(storage.root / rel / filename)
+    return f"{folder}/{filename}"
+
+
 def _log_path(output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / f"archive_log_{datetime.now().strftime('%Y%m%d')}.jsonl"
@@ -129,7 +181,8 @@ def run_archive(
     *,
     targets: list[AttachmentTarget],
     gmail: GmailClient | None,
-    onedrive: OneDriveClient | None,
+    storage: ArchiveStorage | None,
+    storage_mode: str,
     base_folder: str,
     dry_run: bool,
     limit: int,
@@ -148,14 +201,14 @@ def run_archive(
         print(f"Message {message_id}: {msg_targets[0].subject[:60]}")
         for target in msg_targets:
             folder = _onedrive_folder(target, base_folder)
-            dest = f"{folder}/{target.filename}"
+            dest = _display_dest(storage_mode, storage, folder, target.filename) if storage else f"{folder}/{target.filename}"
             if dry_run:
-                print(f"  [DRY-RUN] upload -> {dest} ({target.size_bytes} bytes)")
+                print(f"  [DRY-RUN] save -> {dest} ({target.size_bytes} bytes)")
                 uploaded.append({"filename": target.filename, "dest": dest, "dry_run": True})
                 continue
 
-            if gmail is None or onedrive is None:
-                print("  ERROR: execute mode requires Gmail and OneDrive auth", file=sys.stderr)
+            if gmail is None or storage is None:
+                print("  ERROR: execute mode requires Gmail auth and storage", file=sys.stderr)
                 return 2
 
             content = gmail.download_attachment(message_id, target.attachment_id)
@@ -166,13 +219,13 @@ def run_archive(
                     target.size_bytes,
                     len(content),
                 )
-            web_url = onedrive.upload(
+            saved_path = storage.upload(
                 folder_path=folder,
                 filename=target.filename,
                 content=content,
             )
-            if not web_url:
-                print(f"  ERROR: upload failed for {target.filename}", file=sys.stderr)
+            if not saved_path:
+                print(f"  ERROR: save failed for {target.filename}", file=sys.stderr)
                 _append_log(log_file, {
                     "status": "upload_failed",
                     "message_id": message_id,
@@ -181,11 +234,11 @@ def run_archive(
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
                 break
-            print(f"  uploaded -> {web_url}")
+            print(f"  saved -> {saved_path}")
             uploaded.append({
                 "filename": target.filename,
-                "dest": dest,
-                "web_url": web_url,
+                "dest": saved_path,
+                "storage_mode": storage_mode,
             })
 
         if dry_run:
@@ -193,6 +246,7 @@ def run_archive(
             _append_log(log_file, {
                 "status": "dry_run",
                 "message_id": message_id,
+                "storage_mode": storage_mode,
                 "uploads": uploaded,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
@@ -200,7 +254,7 @@ def run_archive(
             continue
 
         if len(uploaded) != len(msg_targets):
-            print(f"  SKIP trash: not all attachments uploaded for {message_id}", file=sys.stderr)
+            print(f"  SKIP trash: not all attachments saved for {message_id}", file=sys.stderr)
             _append_log(log_file, {
                 "status": "partial_upload",
                 "message_id": message_id,
@@ -218,6 +272,7 @@ def run_archive(
             "status": "archived",
             "message_id": message_id,
             "gmail_link": msg_targets[0].web_link,
+            "storage_mode": storage_mode,
             "uploads": uploaded,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
@@ -244,8 +299,13 @@ def _build_args() -> argparse.Namespace:
                    help="Max messages to process this run (default: 20)")
     p.add_argument("--all-attachments", action="store_true",
                    help="Include messages with multiple attachments (default: skip them)")
+    dest = p.add_mutually_exclusive_group()
+    dest.add_argument("--local-onedrive", action="store_true",
+                      help="Save to local OneDrive sync folder (default when installed)")
+    dest.add_argument("--graph-api", action="store_true",
+                      help="Upload via Microsoft Graph API (requires MS_CLIENT_ID)")
     p.add_argument("--execute", action="store_true",
-                   help="Perform uploads and trash (default is dry-run preview)")
+                   help="Perform saves and trash (default is dry-run preview)")
     p.add_argument("--confirm", action="store_true",
                    help="Required with --execute (safety gate)")
     p.add_argument("--output-dir", type=Path, default=Path("reports"),
@@ -255,6 +315,9 @@ def _build_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    from dotenv import load_dotenv
+
+    load_dotenv()
     args = _build_args()
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -274,12 +337,19 @@ def main() -> int:
             print(f"ERROR: Google auth failed: {e}", file=sys.stderr)
             return 2
 
-    onedrive: OneDriveClient | None = None
-    if args.execute:
-        try:
-            onedrive = _load_onedrive_client()
-        except Exception as e:
-            print(f"ERROR: OneDrive auth failed: {e}", file=sys.stderr)
+    storage: ArchiveStorage | None = None
+    storage_mode = "local-sync"
+    try:
+        storage_mode, storage = resolve_storage(
+            use_graph=args.graph_api,
+            use_local=args.local_onedrive or not args.graph_api,
+        )
+    except Exception as e:
+        if dry_run and args.from_report:
+            print(f"WARNING: Could not resolve OneDrive destination: {e}", file=sys.stderr)
+            print("Dry-run will show relative paths only.", file=sys.stderr)
+        elif not dry_run:
+            print(f"ERROR: {e}", file=sys.stderr)
             return 2
 
     if args.from_report:
@@ -301,11 +371,16 @@ def main() -> int:
         return 0
 
     mode = "DRY-RUN" if dry_run else "EXECUTE"
-    print(f"Mode: {mode} | Eligible attachments: {len(targets)} | Limit: {args.limit} messages")
+    dest_hint = ""
+    if isinstance(storage, LocalOneDriveStorage):
+        dest_hint = f" | OneDrive folder: {storage.root}"
+    print(f"Mode: {mode} | Storage: {storage_mode}{dest_hint} | "
+          f"Eligible attachments: {len(targets)} | Limit: {args.limit} messages")
     return run_archive(
         targets=targets,
         gmail=gmail,
-        onedrive=onedrive,
+        storage=storage,
+        storage_mode=storage_mode,
         base_folder=_archive_base_folder(),
         dry_run=dry_run,
         limit=args.limit,

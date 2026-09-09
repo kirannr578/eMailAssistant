@@ -34,14 +34,26 @@ def _check_google() -> tuple[bool, str]:
         return False, f"Google auth failed: {e}"
 
 
-def _check_microsoft() -> tuple[bool, str]:
+def _check_local_onedrive() -> tuple[bool, str]:
+    from providers.local_onedrive import detect_onedrive_root
+
+    root = detect_onedrive_root()
+    if root:
+        return True, f"Local OneDrive sync folder OK: {root}"
+    return False, (
+        "Local OneDrive folder not found. Sign in to OneDrive desktop, or set "
+        "GMAIL_ARCHIVE_LOCAL_ROOT in .env to your sync path."
+    )
+
+
+def _check_graph_onedrive() -> tuple[bool, str]:
     load_dotenv()
     client_id = os.getenv("MS_CLIENT_ID", "").strip()
     token = Path(os.getenv("MS_TOKEN_CACHE_PATH", "token_cache.bin"))
     if not client_id:
-        return False, "MS_CLIENT_ID not set in .env"
+        return False, "MS_CLIENT_ID not set (optional if using local OneDrive folder)"
     if not token.exists():
-        return False, f"Missing Microsoft token cache: {token} (run archive with --execute once)"
+        return False, f"Missing Microsoft token cache: {token}"
     try:
         from providers.ms_graph_auth import GraphAuth
         from providers.onedrive import OneDriveClient
@@ -53,9 +65,19 @@ def _check_microsoft() -> tuple[bool, str]:
         )
         od = OneDriveClient(auth)
         root_id = od.ensure_folder("")
-        return True, f"OneDrive OK (drive root id: {root_id[:8]}...)"
+        return True, f"Graph OneDrive API OK (drive root id: {root_id[:8]}...)"
     except Exception as e:
-        return False, f"Microsoft/OneDrive auth failed: {e}"
+        return False, f"Graph OneDrive API failed: {e}"
+
+
+def _check_onedrive() -> tuple[bool, str]:
+    local_ok, local_msg = _check_local_onedrive()
+    if local_ok:
+        return True, local_msg
+    graph_ok, graph_msg = _check_graph_onedrive()
+    if graph_ok:
+        return True, graph_msg
+    return False, f"{local_msg} | {graph_msg}"
 
 
 def main() -> int:
@@ -68,7 +90,7 @@ def main() -> int:
     if not args.microsoft_only:
         checks.append(("Google (Gmail)", _check_google()))
     if not args.google_only:
-        checks.append(("Microsoft (OneDrive)", _check_microsoft()))
+        checks.append(("OneDrive destination", _check_onedrive()))
 
     ok = True
     for name, (passed, detail) in checks:
@@ -76,6 +98,10 @@ def main() -> int:
         print(f"[{status}] {name}: {detail}")
         if not passed:
             ok = False
+    if ok and not args.google_only and not args.microsoft_only:
+        print()
+        print("Tip: With OneDrive desktop installed, archive uses your local sync folder")
+        print("     automatically — MS_CLIENT_ID is only needed for --graph-api mode.")
     return 0 if ok else 1
 
 
