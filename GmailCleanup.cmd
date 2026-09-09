@@ -7,8 +7,8 @@ if not exist ".\.venv\Scripts\python.exe" (
 if "%~1"=="" (
     echo Usage:
     echo   GmailCleanup.cmd status
-    echo   GmailCleanup.cmd run 20
-    echo   GmailCleanup.cmd run 20 --dry-run
+    echo   GmailCleanup.cmd scan
+    echo   GmailCleanup.cmd run 10
     pause & exit /b 2
 )
 .\.venv\Scripts\python.exe tools\gmail_cleanup.py %*

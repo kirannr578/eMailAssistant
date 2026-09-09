@@ -145,6 +145,15 @@ class GmailClient:
         ).execute()
         return self._to_message(message_id, {"raw": ""}, meta)
 
+    def get_message_with_attachments(self, message_id: str) -> tuple[EmailMessage, list[EmailAttachment]]:
+        """One API call: metadata + attachment list."""
+        meta = self._svc().users().messages().get(
+            userId="me", id=message_id, format="full",
+        ).execute()
+        atts: list[EmailAttachment] = []
+        self._collect_parts(meta.get("payload") or {}, atts)
+        return self._to_message(message_id, {"raw": ""}, meta), atts
+
     def trash_message(self, message_id: str) -> None:
         """Move a message to Gmail Trash (recoverable for ~30 days)."""
         self._svc().users().messages().trash(userId="me", id=message_id).execute()
