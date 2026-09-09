@@ -113,6 +113,42 @@ class GmailClient:
             body={"removeLabelIds": ["UNREAD"]},
         ).execute()
 
+    def search_message_ids(self, q: str, *, max_results: int = 500) -> list[str]:
+        """Return message IDs matching a Gmail search query, up to max_results."""
+        svc = self._svc()
+        ids: list[str] = []
+        page_token: str | None = None
+        while len(ids) < max_results:
+            page_size = min(100, max_results - len(ids))
+            listing = svc.users().messages().list(
+                userId="me",
+                q=q,
+                maxResults=page_size,
+                pageToken=page_token,
+            ).execute()
+            for item in listing.get("messages", []):
+                ids.append(item["id"])
+                if len(ids) >= max_results:
+                    break
+            page_token = listing.get("nextPageToken")
+            if not page_token:
+                break
+        return ids
+
+    def get_message_metadata(self, message_id: str) -> EmailMessage:
+        """Fetch subject/sender/date for a message without downloading the body."""
+        meta = self._svc().users().messages().get(
+            userId="me",
+            id=message_id,
+            format="metadata",
+            metadataHeaders=["Subject", "From", "To", "Date"],
+        ).execute()
+        return self._to_message(message_id, {"raw": ""}, meta)
+
+    def trash_message(self, message_id: str) -> None:
+        """Move a message to Gmail Trash (recoverable for ~30 days)."""
+        self._svc().users().messages().trash(userId="me", id=message_id).execute()
+
     # ----------------------------------------------------------------
     # Attachments
     # ----------------------------------------------------------------

@@ -66,6 +66,7 @@ class Settings:
     # Document capture for bid emails
     auto_download_bid_docs: bool = True
     bid_docs_base_folder: str = "Email Assistant/Bids"
+    gmail_archive_folder: str = "Email Assistant/Gmail Archive"
     download_docs_from_links: bool = True
     max_download_mb: int = 200
 
@@ -160,6 +161,7 @@ def load_settings() -> Settings:
         auto_block_bid_reminder=_get("AUTO_BLOCK_BID_REMINDER", "1") not in ("0", "", "false", "False"),
         auto_download_bid_docs=_get("AUTO_DOWNLOAD_BID_DOCS", "1") not in ("0", "", "false", "False"),
         bid_docs_base_folder=_get("BID_DOCS_BASE_FOLDER", "Email Assistant/Bids"),
+        gmail_archive_folder=_get("GMAIL_ARCHIVE_FOLDER", "Email Assistant/Gmail Archive"),
         download_docs_from_links=_get("DOWNLOAD_DOCS_FROM_LINKS", "1") not in ("0", "", "false", "False"),
         max_download_mb=_get_int("MAX_DOWNLOAD_MB", 200),
         email_provider=email_provider,
