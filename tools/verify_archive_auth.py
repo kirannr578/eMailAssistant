@@ -31,7 +31,10 @@ def _check_google() -> tuple[bool, str]:
         ids = client.search_message_ids("in:inbox", max_results=1)
         return True, f"Google OK (sample query returned {len(ids)} message id(s))"
     except Exception as e:
-        return False, f"Google auth failed: {e}"
+        return False, (
+            f"Google auth failed: {e}\n"
+            "       Fix: run .\\.venv\\Scripts\\python.exe tools\\setup_google_auth.py"
+        )
 
 
 def _check_local_onedrive() -> tuple[bool, str]:
